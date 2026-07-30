@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Model weights (downloaded at build/runtime)
+*.pt
+*.onnx
+~/.EasyOCR/
+
+# Local artifacts
+sample.jpg
+*.log
+.DS_Store
+
+# Azure
+.azure/
