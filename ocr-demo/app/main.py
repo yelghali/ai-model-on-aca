@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 import easyocr
 import numpy as np
+import psutil
 import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image
@@ -38,7 +39,7 @@ TORCH_THREADS_PER_WORKER = int(os.getenv("TORCH_THREADS_PER_WORKER", "1"))
 
 REPLICA = os.getenv("CONTAINER_APP_REPLICA_NAME") or socket.gethostname()
 
-state: dict = {"pool": None, "executor": None, "ready": False}
+state: dict = {"pool": None, "executor": None, "ready": False, "rss_baseline_mb": None}
 
 _lock = threading.Lock()
 _counters = {
@@ -87,6 +88,10 @@ async def lifespan(app: FastAPI):
     state["pool"] = pool
     state["executor"] = ThreadPoolExecutor(
         max_workers=INFERENCE_WORKERS, thread_name_prefix="infer"
+    )
+    # Memory after runtime + all pooled weights are loaded, before serving traffic.
+    state["rss_baseline_mb"] = round(
+        psutil.Process().memory_info().rss / 1024 / 1024, 1
     )
     state["ready"] = True
     yield
@@ -163,6 +168,8 @@ def stats():
         "running": snapshot["running"],
         "peak_running": snapshot["peak_running"],
         "total_requests": snapshot["total"],
+        "rss_mb": round(psutil.Process().memory_info().rss / 1024 / 1024, 1),
+        "rss_baseline_mb": state["rss_baseline_mb"],
     }
 
 

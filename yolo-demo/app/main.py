@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import torch
+import psutil
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image
 from ultralytics import YOLO
@@ -56,7 +57,7 @@ TORCH_THREADS_PER_WORKER = int(os.getenv("TORCH_THREADS_PER_WORKER", "1"))
 
 REPLICA = os.getenv("CONTAINER_APP_REPLICA_NAME") or socket.gethostname()
 
-state: dict = {"pool": None, "executor": None, "ready": False}
+state: dict = {"pool": None, "executor": None, "ready": False, "rss_baseline_mb": None}
 
 # Live counters so the demo can show queueing vs. real parallelism.
 #   in_flight = accepted requests (queued OR executing)
@@ -112,6 +113,10 @@ async def lifespan(app: FastAPI):
     state["pool"] = pool
     state["executor"] = ThreadPoolExecutor(
         max_workers=INFERENCE_WORKERS, thread_name_prefix="infer"
+    )
+    # Memory after runtime + all pooled weights are loaded, before serving traffic.
+    state["rss_baseline_mb"] = round(
+        psutil.Process().memory_info().rss / 1024 / 1024, 1
     )
     state["ready"] = True
     yield
@@ -193,6 +198,11 @@ def stats():
         "running": snapshot["running"],
         "peak_running": snapshot["peak_running"],
         "total_requests": snapshot["total"],
+        # Resident set size: what ACA actually counts against the memory limit.
+        # Compare rss_mb at rest vs. under load to separate the fixed cost
+        # (runtime + pooled weights) from per-inference activation memory.
+        "rss_mb": round(psutil.Process().memory_info().rss / 1024 / 1024, 1),
+        "rss_baseline_mb": state["rss_baseline_mb"],
     }
 
 

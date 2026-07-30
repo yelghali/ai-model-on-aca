@@ -14,7 +14,7 @@ Both apps expose the same operational surface so the demo story is identical:
 |-------|---------|
 | `GET /` | Service info + effective concurrency config |
 | `GET /healthz` | Liveness/readiness probe (used by ACA) |
-| `GET /stats` | Live in-flight / peak-concurrency counters — **use this to prove parallelism** |
+| `GET /stats` | Live concurrency + memory counters — **use this to prove parallelism** |
 | `POST /predict` or `/ocr` | Inference (`multipart/form-data`, field `file`) |
 
 > **Note:** YOLO does *object detection* (boxes around objects). EasyOCR does *OCR* (reads text).
@@ -136,18 +136,21 @@ difference between them *is* the lesson:
 | `running` / `peak_running` | Requests actually inside `model.predict()` — **true parallelism** |
 
 `peak_running` can never exceed the pool size, which makes the fix undeniable. **These are real
-responses from the deployed app**, same load in both cases (concurrency 8, 40 requests, 1 replica):
+responses from the deployed app**, same load in both cases (concurrency 8, 24 images, 1 replica):
 
 ```jsonc
 // INFERENCE_WORKERS=1 -> 8 requests accepted, but only ever ONE executing
-{ "inference_workers": 1, "peak_in_flight": 8, "peak_running": 1, "total_requests": 41 }
+{ "inference_workers": 1, "peak_in_flight": 8, "peak_running": 1,
+  "rss_mb": 463.8, "rss_baseline_mb": 425.8 }
 
 // INFERENCE_WORKERS=2 -> same queue depth, TWO executing in parallel
-{ "inference_workers": 2, "peak_in_flight": 8, "peak_running": 2, "total_requests": 41 }
+{ "inference_workers": 2, "peak_in_flight": 8, "peak_running": 2,
+  "rss_mb": 495.6, "rss_baseline_mb": 427.4 }
 ```
 
 A large gap between `peak_in_flight` and `peak_running` means requests are **queueing** — the
-replica is saturated and ACA should scale out.
+replica is saturated and ACA should scale out. `rss_mb` vs `rss_baseline_mb` separates the fixed
+cost (runtime + pooled weights) from per-inference activation memory.
 
 Each inference response also carries a breakdown so you can show *where* time goes:
 
@@ -269,59 +272,118 @@ CPU you are already paying for.
 
 ## Performance & scaling numbers
 
-**All numbers below are real**, measured with [loadtest/bench.py](loadtest/bench.py) against
-`yolo-demo` on ACA in `swedencentral`, `yolov8n` @ 640px, 640×480 JPEG input, replicas sized
-**2 vCPU / 4 GiB**. Client ran from a laptop over the public internet, so latency includes
-real network round-trip.
+**All numbers below are real**, measured against `yolo-demo` on ACA in `swedencentral`,
+`yolov8n` @ 640px, 640×480 JPEG input, replicas sized **2 vCPU / 4 GiB**. The client ran from a
+laptop over the public internet, so latency includes real network round-trip.
 
-### A. Per-replica: `INFERENCE_WORKERS` 1 vs 2 (pinned to exactly 1 replica)
+### A. Correctness under concurrency — [loadtest/correctness.py](loadtest/correctness.py)
 
-| Concurrency | RPS (1 worker) | RPS (2 workers) | p50 1w | p50 2w | p95 1w | p95 2w |
+The test that actually matters. Each image carries a unique, verifiable marker (an ellipse at an
+X position unique to that image), all sent concurrently, then every response is checked against
+**the image that produced it**. A shared-model bug would return image A's boxes for image B.
+
+| Scenario | Images | Concurrency | Correct | Wrong | Errors | `peak_running` |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 replica, `workers=1` | 24 | 8 | **24/24** | 0 | 0 | 1 |
+| 1 replica, `workers=2` | 24 | 8 | **24/24** | 0 | 0 | 2 |
+| 10 replicas, `workers=2` | 60 | 20 | **60/60** | 0 | 0 | 2 per replica |
+
+`peak_in_flight` was 8 in the single-replica runs while `peak_running` stayed at exactly the
+pool size — so requests really were queueing, and parallelism really was bounded by the pool.
+**No cross-contamination in any configuration.**
+
+### B. Per-replica: `INFERENCE_WORKERS` 1 vs 2 (pinned to exactly 1 replica)
+
+| Concurrency | RPS 1w | RPS 2w | p50 1w | p50 2w | p95 1w | p95 2w |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 5.05 | 4.93 | 197 ms | 202 ms | 215 ms | 221 ms |
-| 2 | 6.43 | **7.25** | 303 ms | 258 ms | 341 ms | 291 ms |
-| 4 | 6.13 | **7.58** | 619 ms | 514 ms | 1003 ms | 777 ms |
-| 8 | 6.71 | **7.69** | 1173 ms | 1004 ms | 1667 ms | 1511 ms |
+| 1 | 4.55 | 4.39 | 216 ms | 221 ms | 279 ms | 284 ms |
+| 2 | 6.05 | **7.28** | 327 ms | **251 ms** | 366 ms | **285 ms** |
+| 4 | 5.95 | **7.26** | 653 ms | **252 ms** | 995 ms | – |
+| 8 | 5.67 | 5.68 | 1326 ms | **229 ms** | 2275 ms | – |
 
-Reading this:
+- **Concurrency 1: identical** (~4.5 RPS) — one request can't use a second worker.
+- **1 worker is flat from concurrency 2 onward** (6.05 → 5.95 → 5.67 RPS). It has hit
+  $1/\text{latency}$; everything extra just queues, so p50 climbs 327 → 653 → 1326 ms.
+  That is precisely the "handles one image at a time" symptom.
+- **The p50 story is the strong one:** at concurrency 4, 2 workers cut median latency
+  **653 → 252 ms (2.6× better)**. At concurrency 8, **1326 → 229 ms (5.8× better)**.
+- Throughput gain is more modest (~+20%): `inference_ms` rose 162 → 198 ms once both workers
+  were busy, because they share a hard 2 vCPU quota.
 
-- **At concurrency 1 they are identical** (~5 RPS, ~150 ms inference) — as expected, one request
-  can't benefit from a second worker.
-- **The 1-worker curve is flat from concurrency 2 onward** (6.4 → 6.7 RPS). It has hit
-  $1/\text{latency}$; everything else just queues, so p50 grows linearly: 303 → 619 → 1173 ms.
-  This is exactly the "handles one image at a time" symptom.
-- **2 workers lifts the ceiling to ~7.7 RPS (+15%)** and cuts p95 at every level.
+> **Honest finding.** In-replica parallelism mainly buys **latency and responsiveness**, not
+> raw throughput, because inference is CPU-bound and threads cannot create CPU that isn't
+> there. The architectural 1-at-a-time limit and the correctness bug are gone — but
+> **horizontal scale-out is the axis that multiplies throughput.**
 
-> **Honest finding — don't oversell in-replica parallelism.** Going 1→2 workers gave **+15%**,
-> not +100%. Measured `inference_ms` rose from ~150 ms to ~250 ms once both workers were busy:
-> the two workers *do* run truly in parallel, but they compete for the same hard 2 vCPU quota,
-> so each becomes ~1.6× slower. Inference here is **CPU-bound**, and no amount of threading
-> creates CPU that isn't there. The fix removes the *architectural* 1-at-a-time limit and the
-> correctness bug — but **horizontal scale-out is the axis that actually multiplies throughput.**
+### C. Cluster: scaling out (concurrency 24, 400 requests per pass)
 
-### B. Cluster: autoscaling 0 → 10 replicas (concurrency 16, 300 requests per pass)
+Three identical back-to-back passes while KEDA scaled from 1 replica:
 
-Three identical back-to-back passes while KEDA scaled out:
+| Pass | Replicas | RPS | p50 | Failed |
+|---|---:|---:|---:|---:|
+| 1 (burst hits 1 replica) | 2 | 5.85 | 270 ms | 63 |
+| 2 (scaling) | 5 | 14.99 | 561 ms | 14 |
+| 3 (settled) | 5 | **27.38** | 567 ms | 0 |
+| Fully scaled, with client retries | **10** | **25.21** | 315 ms | **0/200** |
 
-| Pass | Replicas serving | RPS | p50 | p95 | max |
-|---|---:|---:|---:|---:|---:|
-| 1 (burst hits cold app) | **1** | 7.14 | 2184 ms | 2800 ms | 4667 ms |
-| 2 (scaling in progress) | **7** | 30.89 | 282 ms | 1631 ms | 1818 ms |
-| 3 (fully scaled) | **8** | **44.90** | 297 ms | **530 ms** | 1905 ms |
+**4.7× throughput** (5.85 → 27.38 RPS) purely from replicas.
 
-- **6.3× throughput** (7.14 → 44.90 RPS) purely from replicas.
-- **p95 improved 5.3×** (2800 → 530 ms) *while serving 6× more traffic*.
-- Scaling is close to linear: 8 replicas × ~5.6 RPS ≈ 45 RPS.
+### D. Connection resets during scale-out — expect them, retry them
 
-This is the core message of the demo: **scale out, don't just scale up.**
+Passes 1–2 lost requests. Worth understanding before you demo it:
 
-### C. Cold start / scale-from-zero
+- The failures were **`HTTPSConnectionPool` transport errors, not HTTP 5xx**. The app logged no
+  errors and `/stats` showed healthy replicas.
+- Cause: ACA's ingress resets some in-flight connections while it adds replicas behind the
+  scenes, and a burst of new TLS handshakes at concurrency 24 amplifies it.
+- **With two connection-level retries, 200/200 succeeded.** Both test scripts now retry
+  `connect` failures only (`read=0`), so a request that actually reached the model is never
+  silently repeated — that would hide a correctness bug rather than fix one.
 
-The first pass above is the cost of `min-replicas 0`: a burst arriving at a cold app is served
-by one replica for roughly the first 40 seconds while new replicas pull the image and load
-models. Mitigations used here: weights are **baked into the image** (no network fetch at
-startup) and every pooled instance is **warmed during `lifespan`**, so a replica only reports
-healthy once it can actually serve.
+Takeaway for the demo: *scaling from zero/low replica counts is not seamless for in-flight
+requests; production clients need retries.* Run `bench.py --retries 0` to show the raw behaviour.
+
+> Also note: a shared `requests.Session` defaults to a **10-connection pool** and raises
+> `SSLEOFError` above that. Both scripts use one session per thread. If you write your own
+> load client, this will bite you and look like a server bug.
+
+### E. Memory — the answer to "YOLO uses lots of RAM"
+
+Measured via `rss_mb` in `/stats` (this is what ACA counts against the memory limit):
+
+| Configuration | RSS at rest | RSS under load | Delta |
+|---|---:|---:|---:|
+| `workers=1` | 425.8 MB | 463.8 MB | +38 MB |
+| `workers=2` | 427.4 MB | 495.6 MB | +68 MB |
+
+The important result: **the second pooled YOLO instance cost only ~1.6 MB at rest.**
+
+$$\text{RSS} \approx \underbrace{\sim424\,\text{MB}}_{\text{torch + cv2 runtime}} + \underbrace{N \times \sim1.6\,\text{MB}}_{\text{pooled weights}} + \underbrace{C \times \sim34\,\text{MB}}_{\text{concurrent activations}}$$
+
+- The **fixed runtime dominates** (~424 MB of torch/OpenCV) and is paid once regardless.
+- **Pooling `yolov8n` is essentially free** — the weights are tiny (6 MB on disk).
+- What actually scales with concurrency is **activation memory, ~34 MB per in-flight inference** —
+  and that cost exists whether you pool or not.
+
+So on 4 GiB you have enormous headroom: ~3.5 GB free ÷ 34 MB ≈ **100 concurrent inferences**
+before RAM is the constraint. **CPU binds long before memory** for this model, which is why
+`INFERENCE_WORKERS=2` on 2 vCPU is the right choice.
+
+This flips for bigger models, where pool duplication stops being free:
+
+| Model | Weights (FP32) | Pool of 2 adds | Verdict |
+|---|---:|---:|---|
+| `yolov8n` | ~12 MB | ~12 MB | Pool freely |
+| `yolov8s` | ~43 MB | ~43 MB | Fine |
+| `yolov8m` | ~100 MB | ~100 MB | Fine at 4 GiB |
+| `yolov8x` | ~272 MB | ~272 MB | Watch it |
+| 7B LLM | ~14 GB | ~14 GB | **Never pool — share, or scale out** |
+
+Sizing rule:
+
+$$\texttt{INFERENCE\_WORKERS} = \min\left(\text{vCPU},\ \left\lfloor \frac{\text{mem limit} - \text{runtime} - \text{safety}}{\text{weights} + \text{activations}} \right\rfloor\right)$$
+
+### F. Cold start / scale-from-zero
 
 | Situation | Observed |
 |---|---|
@@ -329,20 +391,19 @@ healthy once it can actually serve.
 | Warm replica, single inference | ~155 ms end-to-end (~153 ms inference) |
 | Burst onto cold app | ~40 s at 1-replica throughput before scale-out lands |
 
-Part of that lag is KEDA's own cadence — the deployed scale config is:
+Weights are **baked into the image** and every pooled instance is **warmed during `lifespan`**,
+so a replica only reports healthy once it can actually serve. Part of the lag is KEDA cadence:
 
 ```jsonc
 { "minReplicas": 0, "maxReplicas": 10,
   "pollingInterval": 30,   // seconds between scale evaluations
-  "cooldownPeriod": 300,   // seconds of quiet before scaling back down
-  "rules": [{ "name": "http-concurrency", "http": { "metadata": { "concurrentRequests": "2" } } }] }
+  "cooldownPeriod": 300,   // quiet period before scaling back down
+  "rules": [{ "name": "http-concurrency",
+              "http": { "metadata": { "concurrentRequests": "2" } } }] }
 ```
 
-So a burst can wait up to ~30 s just for the next evaluation, plus replica start-up. The
-300 s cooldown is why the app doesn't immediately drop back to zero after a load test — worth
-mentioning during the demo so the replica count "staying high" isn't mistaken for a bug.
-
-For a latency-sensitive demo, deploy with `-MinReplicas 1` to keep one replica always warm.
+The 300 s cooldown is why replica count stays high after a load test — mention it so it isn't
+mistaken for a bug. For a latency-sensitive demo use `-MinReplicas 1`.
 
 ### Capacity model
 
@@ -363,7 +424,8 @@ ai-model-on-aca/
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── loadtest/
-│   ├── bench.py        # concurrency sweep -> the tables above
+│   ├── correctness.py  # per-image correctness under concurrency  <- run this first
+│   ├── bench.py        # concurrency sweep -> the perf tables
 │   ├── locustfile.py   # sustained load -> triggers ACA autoscale
 │   └── requirements.txt
 └── deploy/
@@ -428,10 +490,16 @@ Useful switches: `-SkipBuild`, `-MinReplicas`, `-MaxReplicas`, `-InferenceWorker
 cd loadtest
 pip install -r requirements.txt
 
-# Concurrency sweep -> fills the per-replica table
-python bench.py --host https://<fqdn> --endpoint /predict --levels 1,2,4,8,16
+# 1. CORRECTNESS FIRST - does every image get its own right answer?
+python correctness.py --host https://<fqdn> --endpoint /predict --count 24 --concurrency 8
 
-# Sustained load -> triggers autoscale
+# 2. Concurrency sweep -> per-replica table
+python bench.py --host https://<fqdn> --endpoint /predict --levels 1,2,4,8
+
+# 3. Show raw scale-out connection resets (no client retries)
+python bench.py --host https://<fqdn> --endpoint /predict --levels 24 --requests 200 --retries 0
+
+# 4. Sustained load -> triggers autoscale
 locust -f locustfile.py --host https://<fqdn> --endpoint /predict `
        --headless -u 100 -r 10 -t 3m
 ```
@@ -439,22 +507,25 @@ locust -f locustfile.py --host https://<fqdn> --endpoint /predict `
 Watch it scale:
 
 ```powershell
-az containerapp replica list -n yolo-demo -g rg-aca-model-demo -o table
+(az containerapp replica list -n yolo-demo -g rg-aca-model-demo -o json | ConvertFrom-Json).Count
 ```
 
 ### Suggested demo narrative
 
-1. **Scale to zero** — show 0 replicas, send one request, show the cold start.
-2. **Single replica, rising concurrency** — run `bench.py`; point at `queue_wait_ms` growing
-   while `inference_ms` stays flat. *This is saturation.*
-3. **The bug** — set `INFERENCE_WORKERS=1` and rerun: `peak_running` never exceeds 1. Explain
-   the event loop + thread-safety causes.
-4. **The fix** — set `INFERENCE_WORKERS=2`: `peak_running` hits 2 under identical load.
-5. **The honest caveat** — throughput only rose ~15%, because inference is CPU-bound and the
-   replica has a hard 2 vCPU quota. Segue to scale-out.
-6. **Scale out** — drive concurrency 16; watch replica count climb 1 → 8 and RPS go
-   7 → 45 while p95 *drops* from 2800 ms to 530 ms.
-7. **Scale back in** — stop the load; mention the 300 s cooldown before it returns to zero.
+1. **Correctness first** — run `correctness.py`: 24 distinct images, concurrency 8, all correct.
+   Establishes that parallel inference is *safe* before talking about speed.
+2. **Scale to zero** — show 0 replicas, send one request, show the cold start.
+3. **Single replica, rising concurrency** — run `bench.py`; `queue_wait_ms` grows while
+   `inference_ms` stays flat. *This is saturation.*
+4. **The bug** — set `INFERENCE_WORKERS=1`: `peak_running` never exceeds 1, and p50 at
+   concurrency 8 is ~1300 ms. Explain the event-loop and thread-safety causes.
+5. **The fix** — set `INFERENCE_WORKERS=2`: `peak_running` hits 2, p50 drops to ~230 ms.
+6. **The honest caveat** — throughput only rose ~20%: inference is CPU-bound and the replica has
+   a hard 2 vCPU quota. Segue to scale-out.
+7. **Scale out** — drive concurrency 24; replicas climb 1 → 10, RPS 5.9 → 27+.
+8. **Show the rough edge** — `--retries 0` drops requests during scale-out; with retries,
+   200/200 succeed. Real clients must retry.
+9. **Scale back in** — stop the load; mention the 300 s cooldown.
 
 ### Live demo cheat-sheet
 
