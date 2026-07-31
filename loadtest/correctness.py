@@ -67,6 +67,33 @@ def _font(size=44):
     return ImageFont.load_default()
 
 
+# Characters OCR engines reliably distinguish. Deliberately excludes the classic
+# confusions: 0/O/D/Q, 1/I/l, 5/S, 8/B, 2/Z, 6/G, U/V. Without this the test
+# fails on OCR *character accuracy* and looks like a threading bug, when in fact
+# each image got its own correct result.
+SAFE_ALPHABET = "ACEFHJKLMNPRTWXY"
+
+# Residual glyph confusions, folded away before comparing.
+_CONFUSIONS = str.maketrans({
+    "0": "O", "1": "I", "5": "S", "8": "B", "2": "Z", "6": "G", "Q": "O", "D": "O",
+})
+
+
+def _normalise(s: str) -> str:
+    return s.upper().replace(" ", "").replace("-", "").translate(_CONFUSIONS)
+
+
+def _token_for(idx: int) -> str:
+    """Deterministic, unique, OCR-friendly token: 4 chars of SAFE_ALPHABET."""
+    base = len(SAFE_ALPHABET)
+    chars = []
+    n = idx
+    for _ in range(4):
+        chars.append(SAFE_ALPHABET[n % base])
+        n //= base
+    return "".join(reversed(chars))
+
+
 def make_detection_image(idx: int, total: int):
     """One ellipse whose X centre encodes the image index."""
     span_lo, span_hi = RADIUS + 20, W - RADIUS - 20
@@ -82,10 +109,10 @@ def make_detection_image(idx: int, total: int):
 
 def make_ocr_image(idx: int, total: int):
     """A unique, high-contrast token that must come back verbatim."""
-    token = f"CODE{idx:04d}"
+    token = _token_for(idx)
     img = Image.new("RGB", (W, H), (255, 255, 255))
     d = ImageDraw.Draw(img)
-    d.text((60, 200), token, fill=(0, 0, 0), font=_font(72))
+    d.text((60, 200), token, fill=(0, 0, 0), font=_font(96))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
     return buf.getvalue(), token
@@ -143,12 +170,23 @@ def main():
             replicas_seen.add(body["replica"])
 
         if is_ocr:
-            text = (body.get("text") or "").upper().replace(" ", "")
-            if expected in text:
+            text = _normalise(body.get("text") or "")
+            want = _normalise(expected)
+            if want in text:
                 ok += 1
             else:
                 bad += 1
-                failures.append(f"  image {idx}: expected token {expected!r}, got {text!r}")
+                # Did we get ANOTHER image's token? That is real contamination,
+                # as opposed to the model simply misreading a character.
+                culprit = next(
+                    (j for j in range(args.count)
+                     if j != idx and _normalise(_token_for(j)) in text),
+                    None,
+                )
+                hint = (f" -> this is image {culprit}'s token (CONTAMINATION)"
+                        if culprit is not None else " (OCR misread, not contamination)")
+                failures.append(
+                    f"  image {idx}: expected {expected!r}, got {text!r}{hint}")
         else:
             boxes = body.get("detections") or []
             if not boxes:

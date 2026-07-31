@@ -22,6 +22,86 @@ Both apps expose the same operational surface so the demo story is identical:
 
 ---
 
+## TL;DR — the code that makes YOLO run several inferences at once
+
+This is the section to put on screen. Four pieces, all in
+[yolo-demo/app/main.py](yolo-demo/app/main.py) (the OCR demo is identical bar the model class).
+
+**1 — At startup, build N models and an N-thread executor** — [main.py](yolo-demo/app/main.py#L97-L114)
+
+```python
+torch.set_num_threads(TORCH_THREADS_PER_WORKER)      # cap BEFORE building models
+
+pool = queue.Queue()
+for _ in range(INFERENCE_WORKERS):
+    model = YOLO(MODEL_NAME)
+    model.predict(warm, imgsz=IMGSZ, conf=CONF, verbose=False)   # warm THIS instance
+    pool.put(model)
+
+state["pool"]     = pool
+state["executor"] = ThreadPoolExecutor(max_workers=INFERENCE_WORKERS)
+```
+
+**2 — The endpoint hands work to a thread and never blocks** — [main.py](yolo-demo/app/main.py#L186-L192)
+
+```python
+raw   = await file.read()                       # async I/O: fine on the event loop
+image = Image.open(io.BytesIO(raw)).convert("RGB")
+
+loop   = asyncio.get_running_loop()
+result = await loop.run_in_executor(state["executor"], _infer, image)
+```
+
+**3 — Each worker borrows its *own* model, then returns it** — [main.py](yolo-demo/app/main.py#L131-L141)
+
+```python
+def _infer(image):
+    model = state["pool"].get()      # borrow: no two threads share an instance
+    try:
+        return model.predict(image, imgsz=IMGSZ, conf=CONF, verbose=False)
+    finally:
+        state["pool"].put(model)     # ALWAYS returned, even if predict() raised
+```
+
+**4 — ACA adds replicas when a replica would have to queue** — [deploy/deploy.ps1](deploy/deploy.ps1)
+
+```powershell
+--scale-rule-type http --scale-rule-http-concurrency $InferenceWorkers `
+--min-replicas 0 --max-replicas 10
+```
+
+The whole trick is one invariant: **executor threads == pool size**. At most N threads can be
+inside `_infer`, and there are exactly N models, so `pool.get()` never waits and no two threads
+can ever touch the same model.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant EL as Event loop (1 thread)
+    participant EX as Executor (N threads)
+    participant P as Pool of N models
+    C->>EL: POST /predict
+    EL->>EX: run_in_executor(_infer)
+    Note over EL: loop FREE - accepts more requests
+    EX->>P: pool.get() -> model #k
+    EX->>EX: model.predict()  (blocking, but off the loop)
+    EX->>P: pool.put(model #k)
+    EX-->>EL: result
+    EL-->>C: JSON
+```
+
+**Verified live** — same load (24 images, concurrency 8, 1 replica), only `INFERENCE_WORKERS` changed:
+
+| `INFERENCE_WORKERS` | `peak_in_flight` | `peak_running` | Correct | p50 @ conc 8 |
+|---:|---:|---:|---:|---:|
+| 1 | 8 | **1** | 24/24 | 1326 ms |
+| 2 | 8 | **2** | 24/24 | **229 ms** |
+
+Full reasoning for *why* each piece is needed is in
+[The concurrency problem](#the-concurrency-problem-the-most-valuable-part-of-this-demo) below.
+
+---
+
 ## The concurrency problem (the most valuable part of this demo)
 
 > *"We saw YOLO handle only 1 image at a time — it couldn't run several inferences in parallel."*
@@ -408,6 +488,120 @@ mistaken for a bug. For a latency-sensitive demo use `-MinReplicas 1`.
 ### Capacity model
 
 $$\text{max concurrent inferences} = \texttt{INFERENCE\_WORKERS} \times \text{maxReplicas} = 2 \times 10 = 20$$
+
+---
+
+## The OCR demo — same pattern, very different economics
+
+`ocr-demo` runs the identical architecture (event-loop offload + pooled instances) against
+EasyOCR. Deploying both is worth it: the *code* is the same, the *numbers* are not, and the
+contrast is the most instructive part of the demo.
+
+### Correctness
+
+| Scenario | Images | Concurrency | Correct | Wrong | `peak_running` |
+|---|---:|---:|---:|---:|---:|
+| 1 replica, `workers=1` | 24 | 8 | **24/24** | 0 | 1 |
+| 1 replica, `workers=2` | 24 | 8 | **24/24** | 0 | 2 |
+
+### A trap worth showing: OCR accuracy is not a threading bug
+
+The first correctness run reported **21/24 "wrong"** — and it was a bug in the *test*, not the
+service:
+
+```
+image 0:  expected 'CODE0000', got 'CODEOOOO'
+image 7:  expected 'CODE0007', got 'CODEOOO7'
+image 22: expected 'CODE0022', got 'CODEOO22'
+```
+
+Every answer belonged to **its own image** (the trailing index always matched) — EasyOCR was
+simply reading the digit `0` as the letter `O`. Classic glyph ambiguity, not cross-contamination.
+
+[loadtest/correctness.py](loadtest/correctness.py) now uses an OCR-unambiguous alphabet
+(`ACEFHJKLMNPRTWXY` — no `0/O`, `1/I`, `5/S`, `8/B`) and, when a token doesn't match, explicitly
+reports whether the text belongs to **another image** (real contamination) or is just a misread.
+After the fix: **24/24**.
+
+> Lesson for the demo: when validating a model API, make your test assert on **identity**
+> (which input produced this?) rather than on **model accuracy**. Otherwise you'll chase a
+> threading ghost that doesn't exist.
+
+### Performance (1 replica, 2 vCPU / 4 GiB): `INFERENCE_WORKERS` 1 vs 2
+
+| Concurrency | RPS 1w | RPS 2w | p50 1w | p50 2w | Speed-up (p50) |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.41 | 0.39 | 2416 ms | 2368 ms | — |
+| 2 | 0.42 | **0.54** | 4616 ms | **2511 ms** | **1.8×** |
+| 4 | 0.41 | **0.59** | 9430 ms | **4978 ms** | **1.9×** |
+| 8 | 0.38 | **0.72** | 18616 ms | **9741 ms** | **1.9×** |
+
+`inference_ms` stayed ~2350 ms in *every* cell — the model itself never slowed down.
+
+**This is a far cleaner demonstration than YOLO:**
+
+- **1 worker is perfectly flat at ~0.41 RPS** no matter the concurrency, and p50 doubles with
+  every doubling of load: 2.4 s → 4.6 s → 9.4 s → 18.6 s. Textbook serialization.
+- **2 workers gives a near-linear 1.9× improvement** in both throughput and latency.
+
+> **Why does OCR benefit ~2× where YOLO only gained ~20%?**
+> Because `inference_ms` is unchanged at 2350 ms with two workers, whereas YOLO's rose from
+> 162 → 198 ms. A single EasyOCR inference does *not* saturate 2 vCPU on its own — it has long
+> sequential phases (detect, crop, then recognise) with limited matrix parallelism — so a second
+> worker uses genuinely idle CPU. A single `yolov8n` forward pass is one big well-parallelised
+> convolution stack that already keeps the cores busy.
+>
+> **Practical rule:** the slower and less CPU-saturating a single inference is, the more
+> in-replica parallelism pays. Measure `inference_ms` at 1 vs N workers — if it stays flat,
+> you're getting real parallelism for free; if it inflates, you're just splitting the same CPU.
+
+### Memory — where OCR really differs
+
+| | YOLO (`yolov8n`) | OCR (EasyOCR) |
+|---|---:|---:|
+| Baseline, `workers=1` | 425.8 MB | 492.2 MB |
+| Baseline, `workers=2` | 427.4 MB | 576.6 MB |
+| **Cost of 2nd pooled instance** | **+1.6 MB** | **+84.4 MB** |
+| Under load, `workers=2` | 495.6 MB | 837–947 MB |
+| **Per concurrent inference** | **~34 MB** | **~130–185 MB** |
+
+This is the practical answer to *"can I really run several inferences in one replica?"*:
+
+- **YOLO nano: pool freely.** A second instance is essentially free, and activations are small.
+- **EasyOCR: pool deliberately.** Each `Reader` loads **two** models (detection + recognition),
+  so instances cost ~84 MB each, and each concurrent inference adds ~130–185 MB. On 4 GiB you'd
+  reach the memory limit around 15–20 concurrent inferences — still well beyond what 2 vCPU can
+  actually execute, so **CPU is still the binding constraint**, but the headroom is ~5× smaller.
+
+### Cluster: scaling out (concurrency 20, 60 requests per pass)
+
+| Pass | Replicas | RPS | p50 | p95 |
+|---|---:|---:|---:|---:|
+| 1 (scaling up) | 6 | 0.83 | 22880 ms | 31089 ms |
+| 2 (fully scaled) | **10** | **3.91** | **2705 ms** | 8516 ms |
+| 3 (steady) | 10 | 3.50 | 3356 ms | 10506 ms |
+
+**4.7× throughput** (0.83 → 3.91 RPS) and **p50 improved 8.5×** (22.9 s → 2.7 s).
+
+End-to-end, combining both axes:
+
+$$0.41\ \text{RPS} \xrightarrow[\text{2 workers}]{\text{scale up}} 0.72 \xrightarrow[\text{10 replicas}]{\text{scale out}} 3.91\ \text{RPS} \quad (\textbf{9.5×})$$
+
+### Practical recommendation for OCR
+
+Because each request occupies a worker for ~2.4 s, the scale rule matters more than for YOLO:
+
+```powershell
+# Latency-sensitive: 1 inference per replica, scale out aggressively
+./deploy.ps1 -Demo ocr -InferenceWorkers 1 -ConcurrentRequests 1 -MaxReplicas 20
+
+# Throughput/cost-oriented: 2 per replica (what we measured)
+./deploy.ps1 -Demo ocr -InferenceWorkers 2 -ConcurrentRequests 2 -MaxReplicas 10
+```
+
+With 2.4 s inferences, a replica accepting more than `INFERENCE_WORKERS` concurrent requests
+builds a queue that takes *seconds* to drain — so keeping `concurrentRequests == workers` is
+even more important here than for YOLO.
 
 ---
 
