@@ -37,9 +37,11 @@ Write-Host ("-" * 62)
 foreach ($a in $apps) {
     $scale = $a.properties.template.scale
     $reps = az containerapp replica list -n $a.name -g $ResourceGroup -o json 2>$null | ConvertFrom-Json
+    # PowerShell 5.1 has no ?? operator.
+    $profileName = $a.properties.workloadProfileName
+    if (-not $profileName) { $profileName = 'Consumption' }
     Write-Host ("  {0,-20} min={1} max={2}  running={3}  profile={4}" -f `
-        $a.name, $scale.minReplicas, $scale.maxReplicas, $reps.Count, `
-        ($a.properties.workloadProfileName ?? 'Consumption'))
+        $a.name, $scale.minReplicas, $scale.maxReplicas, $reps.Count, $profileName)
 }
 
 if ($ShowOnly) { exit 0 }
