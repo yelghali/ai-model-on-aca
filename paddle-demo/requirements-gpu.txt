@@ -1,0 +1,14 @@
+# GPU build for ACA serverless GPU (NC8as-T4 / NC24-A100).
+#
+# CUDA 12.6 wheels; the base image supplies the CUDA runtime + cuDNN, and the
+# ACA serverless GPU node supplies the driver.
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+paddlepaddle-gpu==3.0.0
+paddleocr[doc-parser]==3.7.0
+
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+pillow==11.0.0
+psutil==6.1.0

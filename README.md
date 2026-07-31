@@ -495,6 +495,144 @@ $$\text{max concurrent inferences} = \texttt{INFERENCE\_WORKERS} \times \text{ma
 
 ---
 
+## Model comparison — YOLO vs PP-StructureV3, CPU vs serverless GPU
+
+A third demo, [`paddle-demo/`](paddle-demo/), runs **PaddleOCR PP-StructureV3** (document
+parsing: layout detection + OCR) and can be deployed to **CPU** or to an **ACA serverless GPU**
+workload profile from the same code.
+
+### Measured cost and performance
+
+Synthetic A4 document page (273 KB JPEG), ACA `swedencentral`, single replica.
+
+| Config | Compute | $/second | ms/page | pages/s | **$/1k pages** |
+|---|---|---:|---:|---:|---:|
+| YOLO `yolov8n` | 2 vCPU / 4 GiB | $0.000060 | **431** | 2.32 | **$0.03** |
+| PP-StructureV3 | 4 vCPU / 8 GiB | $0.000120 | **14,515** | 0.07 | **$1.74** |
+| PP-StructureV3 | **T4 serverless GPU** | $0.000090 | **1,413** | 0.71 | **$0.13** |
+
+### The GPU wins on both axes — decisively
+
+| PP-StructureV3 | CPU (4 vCPU) | T4 serverless GPU | Gain |
+|---|---:|---:|---:|
+| Inference per page | 14,515 ms | **1,240 ms** | **11.7× faster** |
+| Throughput | 0.07 pages/s | **0.71 pages/s** | **10× more** |
+| Cost per 1k pages | $1.74 | **$0.13** | **13× cheaper** |
+| Cost per second | $0.000120 | **$0.000090** | 25% cheaper |
+
+This is the unusual case where the accelerator is **cheaper per second as well as faster**: an
+NC8as-T4 (8 vCPU + 56 GiB + 1 T4) bills at $0.000090/s, less than a 4 vCPU / 8 GiB CPU container
+at $0.000120/s. There is no trade-off to weigh — for PP-StructureV3, **use the GPU**.
+
+At 100,000 pages:
+
+| | CPU | GPU |
+|---|---:|---:|
+| Cost | $174 | **$13** |
+| Time on 1 replica | ~403 h | **~39 h** |
+
+### These two models are not doing the same job
+
+The 67× cost gap is real but must not be read as "YOLO is better value":
+
+| | YOLO `yolov8n` | PP-StructureV3 |
+|---|---|---|
+| Models per pass | 1 | **4** — block layout, doc layout, text det, text rec |
+| Parameters | 3.2 M | ~100 M+ |
+| Output | bounding boxes | layout regions + full text + reading order |
+
+The useful conclusion is architectural: **don't reach for document parsing when detection is
+all you need.** Match the model to the question being asked.
+
+### Batching: no help on CPU, modest help on GPU
+
+`/parse` accepts a batch of images and passes the whole list to `pipeline.predict(...)`, which is
+PaddleOCR's native batching path.
+
+| Batch size | 1 | 2 | 4 |
+|---|---:|---:|---:|
+| CPU — ms/page | 15,187 | 14,515 | 14,760 |
+| GPU — ms/page | 1,682 | 1,458 | **1,413** |
+
+**CPU is flat**, because a single page already saturates it — there is no idle capacity for a
+second page to fill. **GPU improves ~16% from batch 1 to 4**, since one page leaves much of the
+device idle. Batching is a GPU optimisation, and even there the gain is modest for this
+pipeline: PP-StructureV3 runs four models in sequence, so there are inherently serial stages
+that batching cannot overlap.
+
+### PP-StructureV3 on CPU is not viable at volume
+
+At 14.5 s/page, 100,000 pages costs:
+
+$$100{,}000 \times 14.5\,\text{s} = 403\ \text{replica-hours} \approx \$174$$
+
+Even at 5 replicas that is ~80 hours of wall clock. The same work on one T4 takes ~39 hours and
+**$13** — so the answer to "do I need a GPU for this?" is an unambiguous yes.
+
+### Does PaddleOCR handle batching and parallelism itself?
+
+Partly — and the distinction matters:
+
+- **Batching: yes.** `predict()` accepts a list or a directory, with a `batch_size`. That is what
+  `/parse` uses.
+- **Concurrency: no, not within one object.** PaddleOCR's own
+  [parallel-inference guide](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/local_inference/parallel_inference.html)
+  creates *multiple pipeline instances* — its reference script exposes `--instances_per_device`,
+  and with multiple devices it "creates an instance of the underlying pipeline class on each
+  device". So the model pool in this repo is not custom cleverness; it is what upstream
+  prescribes.
+
+One difference: upstream uses **multiprocessing**, we use threads (cheaper — one runtime, N model
+copies). Threads only parallelise if Paddle releases the GIL during inference. Watch
+`peak_running` in `/stats`: if it never exceeds 1 while `workers` is 2, switch to
+`uvicorn --workers N` or scale replicas instead.
+
+### Two deployment traps we hit (both cost real time)
+
+**1. `paddlepaddle-gpu` cannot be imported at image-build time.**
+
+```
+ImportError: libcuda.so.1: cannot open shared object file
+```
+
+`libcuda.so.1` comes from the NVIDIA *driver* on a GPU node; there is no GPU during
+`docker build`. So the weights cannot be pre-downloaded inside the GPU image.
+[Dockerfile.gpu](paddle-demo/Dockerfile.gpu) solves this with a **multi-stage build**: stage 1
+downloads the weights using the CPU wheel, stage 2 copies them into the CUDA image. Paddle
+inference model files are framework-agnostic, so CPU-downloaded weights run on the GPU.
+
+**2. ACA does not size a GPU container from the workload profile.**
+
+The app was OOM-killed (`exit code 137`, 200 failed startup probes) because ACA defaulted the
+container to **0.5 vCPU / 1 GiB** — nowhere near enough to load four models. A GPU workload
+profile grants access to the GPU; it does **not** imply CPU/memory. Size it explicitly:
+
+```powershell
+--workload-profile-name gpu-t4 --cpu 8.0 --memory 56.0Gi   # NC8as-T4
+```
+
+### Cost control — the tests are cheap, idle replicas are not
+
+Running the benchmarks costs very little. The money goes on **leaving replicas warm**:
+
+| Config | Test run (200 batches) | Left at `min-replicas 1` |
+|---|---:|---:|
+| YOLO 2 vCPU / 4 GiB | ~$0.02 | ~$5 / day |
+| PP-StructureV3 CPU | ~$1.40 | ~$10 / day |
+| PP-StructureV3 T4 GPU | ~$0.11 | ~$8 / day |
+
+Three apps left running ≈ **$23/day ≈ $700/month**. Two safeguards ship with this repo:
+
+- [`deploy/scaledown.ps1`](deploy/scaledown.ps1) — scale every app to zero, keeping it deployed
+- `soak.py --budget-usd N` — hard-stops a soak run once estimated spend reaches the allowance
+
+```powershell
+./scaledown.ps1 -ShowOnly     # inspect first
+./scaledown.ps1               # then scale all apps to zero
+```
+
+---
+
 ## The OCR demo — same pattern, very different economics
 
 `ocr-demo` runs the identical architecture (event-loop offload + pooled instances) against

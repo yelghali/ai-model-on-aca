@@ -8,7 +8,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('yolo', 'ocr')][string]$Demo,
+    [Parameter(Mandatory)][ValidateSet('yolo', 'ocr', 'paddle')][string]$Demo,
     [string]$ResourceGroup = 'rg-aca-model-demo',
     [string]$Location = 'westeurope',
     # ACA capacity varies by region. If environment creation fails with
@@ -18,6 +18,20 @@ param(
     [string]$Environment = 'aca-model-demo-env',
     [int]$MinReplicas = 0,
     [int]$MaxReplicas = 10,
+
+    # Serverless GPU. Pass -Gpu to run on a Consumption-GPU workload profile
+    # instead of the CPU Consumption profile. GPU builds use Dockerfile.gpu.
+    [switch]$Gpu,
+    [string]$GpuProfile = 'gpu-t4',
+    [string]$GpuProfileType = 'Consumption-GPU-NC8as-T4',
+    # ACA does NOT size the container from the GPU profile - it defaults to
+    # 0.5 vCPU / 1 GiB, which OOM-kills (exit 137) while loading models.
+    # NC8as-T4 provides 8 vCPU / 56 GiB, so claim it explicitly.
+    [string]$GpuCpu = '8.0',
+    [string]$GpuMemory = '56.0Gi',
+
+    # Suffix so CPU and GPU variants can run side by side for comparison.
+    [string]$NameSuffix = '',
 
     # Container size. ACA gives CPU in cores; memory must follow the allowed ratios.
     [string]$Cpu = '2.0',
@@ -93,10 +107,12 @@ function Try-Az {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $context = Join-Path $repoRoot "$Demo-demo"
-$appName = "$Demo-demo"
+$appName = if ($NameSuffix) { "$Demo-demo-$NameSuffix" } else { "$Demo-demo" }
 $imageTag = "${appName}:v1"
+$dockerfile = if ($Gpu) { "$context/Dockerfile.gpu" } else { "$context/Dockerfile" }
 
 if (-not (Test-Path $context)) { throw "Demo folder not found: $context" }
+if (-not (Test-Path $dockerfile)) { throw "Dockerfile not found: $dockerfile" }
 
 Write-Host "==> Demo: $Demo | RG: $ResourceGroup | Location: $Location | Env: $EnvLocation" -ForegroundColor Cyan
 Write-Host "==> Sizing: $Cpu vCPU / $Memory | workers=$InferenceWorkers | scale @ $ConcurrentRequests concurrent" -ForegroundColor Cyan
@@ -137,7 +153,7 @@ if ($SkipBuild) {
 else {
     Write-Host '==> Building image in ACR (a few minutes)' -ForegroundColor Cyan
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    az acr build --registry $Registry --image $imageTag --file "$context/Dockerfile" $context
+    az acr build --registry $Registry --image $imageTag --file $dockerfile $context
     $buildExit = $LASTEXITCODE
     $ErrorActionPreference = $prev
     if ($buildExit -ne 0) { throw "ACR build failed with exit code $buildExit" }
@@ -168,9 +184,40 @@ else {
     Write-Host "==> Reusing Container Apps environment: $Environment" -ForegroundColor Cyan
 }
 
+# --- Serverless GPU workload profile --------------------------------------
+# Consumption-GPU-* profiles are SERVERLESS: they scale to zero and bill per
+# second, unlike dedicated GPU workload profiles which bill for reserved nodes.
+if ($Gpu) {
+    $profiles = Try-Az containerapp env workload-profile list -n $Environment -g $ResourceGroup --query "[].name" -o tsv
+    if (-not ($profiles -split "`n" | ForEach-Object { $_.Trim() }) -contains $GpuProfile) {
+        Write-Host "==> Adding serverless GPU workload profile: $GpuProfile ($GpuProfileType)" -ForegroundColor Cyan
+        Invoke-Az containerapp env workload-profile add -n $Environment -g $ResourceGroup `
+            --workload-profile-name $GpuProfile --workload-profile-type $GpuProfileType | Out-Null
+    }
+    else {
+        Write-Host "==> Reusing GPU workload profile: $GpuProfile" -ForegroundColor Cyan
+    }
+}
+
 # --- Container App ---------------------------------------------------------
 $acrUser = Invoke-Az acr credential show -n $Registry --query username -o tsv
 $acrPass = Invoke-Az acr credential show -n $Registry --query "passwords[0].value" -o tsv
+
+# Model-specific env vars. Paddle uses a different threading knob than torch.
+$envVars = @("INFERENCE_WORKERS=$InferenceWorkers")
+if ($Demo -eq 'paddle') {
+    $envVars += "CPU_THREADS_PER_WORKER=$TorchThreadsPerWorker"
+    $envVars += if ($Gpu) { 'PADDLE_DEVICE=gpu' } else { 'PADDLE_DEVICE=cpu' }
+}
+else {
+    $envVars += "TORCH_THREADS_PER_WORKER=$TorchThreadsPerWorker"
+}
+
+# GPU containers must still be sized explicitly; ACA otherwise defaults them to
+# 0.5 vCPU / 1 GiB and the model load is OOM-killed.
+$sizeArgs = if ($Gpu) { @('--cpu', $GpuCpu, '--memory', $GpuMemory) }
+           else { @('--cpu', $Cpu, '--memory', $Memory) }
+$profileArgs = if ($Gpu) { @('--workload-profile-name', $GpuProfile) } else { @() }
 
 $appExists = Try-Az containerapp show -n $appName -g $ResourceGroup --query name -o tsv
 
@@ -179,9 +226,9 @@ if ($appExists) {
     Invoke-Az containerapp update `
         -n $appName -g $ResourceGroup `
         --image "$loginServer/$imageTag" `
-        --cpu $Cpu --memory $Memory `
+        @sizeArgs `
         --min-replicas $MinReplicas --max-replicas $MaxReplicas `
-        --set-env-vars "INFERENCE_WORKERS=$InferenceWorkers" "TORCH_THREADS_PER_WORKER=$TorchThreadsPerWorker" `
+        --set-env-vars @envVars `
         --scale-rule-name http-concurrency `
         --scale-rule-type http `
         --scale-rule-http-concurrency $ConcurrentRequests | Out-Null
@@ -193,16 +240,17 @@ else {
         --image "$loginServer/$imageTag" `
         --registry-server $loginServer --registry-username $acrUser --registry-password $acrPass `
         --target-port 8000 --ingress external --transport auto `
-        --cpu $Cpu --memory $Memory `
+        @profileArgs @sizeArgs `
         --min-replicas $MinReplicas --max-replicas $MaxReplicas `
-        --env-vars "INFERENCE_WORKERS=$InferenceWorkers" "TORCH_THREADS_PER_WORKER=$TorchThreadsPerWorker" `
+        --env-vars @envVars `
         --scale-rule-name http-concurrency `
         --scale-rule-type http `
         --scale-rule-http-concurrency $ConcurrentRequests | Out-Null
 }
 
 $fqdn = Invoke-Az containerapp show -n $appName -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv
-$path = if ($Demo -eq 'yolo') { '/predict' } else { '/ocr' }
+$path = switch ($Demo) { 'yolo' { '/predict' } 'ocr' { '/ocr' } 'paddle' { '/parse' } }
+$sizeLabel = if ($Gpu) { "$GpuProfileType - $GpuCpu vCPU / $GpuMemory (serverless GPU)" } else { "$Cpu vCPU / $Memory" }
 
 Write-Host ''
 Write-Host '=================================================================' -ForegroundColor Green
@@ -210,6 +258,7 @@ Write-Host " App URL   : https://$fqdn"         -ForegroundColor Green
 Write-Host " Docs      : https://$fqdn/docs"    -ForegroundColor Green
 Write-Host " Health    : https://$fqdn/healthz" -ForegroundColor Green
 Write-Host " Stats     : https://$fqdn/stats"   -ForegroundColor Green
+Write-Host " Compute   : $sizeLabel"            -ForegroundColor Green
 Write-Host " Autoscale : $MinReplicas..$MaxReplicas replicas @ $ConcurrentRequests concurrent req/replica" -ForegroundColor Green
 Write-Host " Capacity  : $InferenceWorkers parallel inferences/replica -> up to $($InferenceWorkers * $MaxReplicas) cluster-wide" -ForegroundColor Green
 Write-Host '=================================================================' -ForegroundColor Green

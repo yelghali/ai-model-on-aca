@@ -1,0 +1,65 @@
+# GPU build for Azure Container Apps SERVERLESS GPU
+# (Consumption-GPU-NC8as-T4 or Consumption-GPU-NC24-A100).
+#
+# Two stages, for a specific reason:
+#
+#   paddlepaddle-gpu links against libcuda.so.1, which is supplied by the NVIDIA
+#   DRIVER on a GPU node. During `docker build` there is no GPU and no driver, so
+#   simply importing paddle fails with:
+#       ImportError: libcuda.so.1: cannot open shared object file
+#   That means we cannot pre-download the model weights in the GPU image itself.
+#
+#   So stage 1 downloads the weights using the CPU wheel (no driver needed) and
+#   stage 2 copies them in. Paddle inference model files are framework-agnostic,
+#   so CPU-downloaded weights run fine on the GPU.
+#
+# Baking the weights matters: without it every replica fetches ~1 GB on start,
+# which is the dominant part of a serverless GPU cold start.
+
+# ---------- stage 1: fetch weights on CPU ----------
+FROM python:3.11-slim AS weights
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_NO_CACHE_DIR=1
+RUN pip install --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/ \
+        paddlepaddle==3.0.0 "paddleocr[doc-parser]==3.7.0"
+
+COPY download_models.py .
+RUN python download_models.py
+
+
+# ---------- stage 2: runtime on GPU ----------
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3-pip \
+        libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PADDLE_DEVICE=gpu \
+    PADDLE_LANG=en \
+    PADDLE_LAYOUT_MODEL=PP-DocLayout_plus-L \
+    PADDLE_ENABLE_MKLDNN=0 \
+    INFERENCE_WORKERS=1 \
+    CPU_THREADS_PER_WORKER=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+
+COPY requirements-gpu.txt .
+RUN python -m pip install --upgrade pip && python -m pip install -r requirements-gpu.txt
+
+# Weights fetched in stage 1 - no GPU/driver required to produce them.
+COPY --from=weights /root/.paddlex /root/.paddlex
+
+COPY app/ ./app/
+
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,20 @@
+# CPU build.
+#
+# PaddleOCR 3.x REQUIRES PaddlePaddle 3.x. The commonly shared snippet pinning
+# paddlepaddle-gpu==2.6.2 alongside paddleocr==3.7.0 is incompatible - 2.x will
+# not run the 3.x pipelines.
+#
+# PP-StructureV3 lives in the "doc-parser" optional dependency group, so bare
+# `paddleocr` is not enough.
+#
+# PaddlePaddle wheels come from Paddle's own index, not PyPI.
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
+
+paddlepaddle==3.0.0
+paddleocr[doc-parser]==3.7.0
+
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+pillow==11.0.0
+psutil==6.1.0
