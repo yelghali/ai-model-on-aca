@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Models on Azure Container Apps — Scaling Walkthrough</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef;
+  --cp-bg-elevated: #fcfbf8;
+  --cp-surface: #ffffff;
+  --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede;
+  --cp-border-strong: #919191;
+  --cp-text: #242424;
+  --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f;
+  --cp-accent: #b11f4b;
+  --cp-accent-hover: #9a1a41;
+  --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff;
+  --cp-success: #16a34a;
+  --cp-danger: #dc2626;
+  --cp-warning: #f59e0b;
+  --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+  --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86);
+  --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55);
+  --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a;
+  --cp-bg-elevated: #343231;
+  --cp-surface: #292929;
+  --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747;
+  --cp-border-strong: #5f5f5f;
+  --cp-text: #dedede;
+  --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0;
+  --cp-accent: #fd8ea1;
+  --cp-accent-hover: #fb7b91;
+  --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a;
+  --cp-success: #4ade80;
+  --cp-danger: #f87171;
+  --cp-warning: #fbbf24;
+  --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72);
+  --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04);
+  --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--cp-bg);
+  color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  overflow: hidden;
+}
+
+code, pre, .mono { font-family: Consolas, "Courier New", Courier, monospace; }
+
+/* ---------- chrome ---------- */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: 52px;
+  display: flex; align-items: center; gap: 16px; padding: 0 20px;
+  background: var(--cp-panel-strong);
+  border-bottom: 1px solid var(--cp-border);
+  backdrop-filter: blur(8px);
+  z-index: 50;
+}
+.brand { font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+.brand span { color: var(--cp-accent); }
+.spacer { flex: 1; }
+.btn {
+  border: 1px solid var(--cp-border);
+  background: var(--cp-surface);
+  color: var(--cp-text);
+  border-radius: 0.625rem;
+  padding: 6px 12px;
+  font: inherit; font-size: 14px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--cp-border-strong); }
+.btn.primary { background: var(--cp-accent); color: var(--cp-accent-fg); border-color: var(--cp-accent); }
+.btn.primary:hover { background: var(--cp-accent-hover); }
+.counter { font-size: 14px; color: var(--cp-text-muted); min-width: 62px; text-align: center; }
+
+.progress { position: fixed; top: 52px; left: 0; right: 0; height: 3px; background: var(--cp-border); z-index: 50; }
+.progress > div { height: 100%; background: var(--cp-accent); width: 0; transition: width .25s ease; }
+
+/* ---------- slides ---------- */
+.deck { position: fixed; inset: 55px 0 0 0; overflow: hidden; }
+.slide {
+  position: absolute; inset: 0;
+  overflow-y: auto;
+  padding: 34px 48px 90px;
+  opacity: 0; visibility: hidden;
+  transition: opacity .22s ease;
+}
+.slide.active { opacity: 1; visibility: visible; }
+.inner { max-width: 1120px; margin: 0 auto; }
+
+h1 { font-size: 40px; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
+h2 { font-size: 29px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.02em; }
+h3 { font-size: 18px; margin: 22px 0 8px; }
+.sub { color: var(--cp-text-muted); font-size: 17px; margin: 0 0 22px; }
+p { margin: 0 0 12px; }
+
+.kicker {
+  display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--cp-accent);
+  background: var(--cp-accent-soft); border-radius: 999px; padding: 4px 12px; margin-bottom: 14px;
+}
+
+.card {
+  background: var(--cp-surface); border: 1px solid var(--cp-border);
+  border-radius: 16px; padding: 18px 20px;
+  box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14);
+}
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: 1fr 1fr; }
+.g3 { grid-template-columns: repeat(3, 1fr); }
+.g4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } }
+
+pre {
+  background: var(--cp-surface-soft); border: 1px solid var(--cp-border);
+  border-radius: 0.625rem; padding: 14px 16px; overflow-x: auto;
+  font-size: 13.5px; line-height: 1.6; margin: 10px 0;
+}
+pre .c { color: var(--cp-text-soft); }
+pre .k { color: var(--cp-accent); font-weight: 600; }
+pre .hl { background: var(--cp-highlight); border-radius: 4px; padding: 1px 3px; }
+code.i {
+  background: var(--cp-surface-soft); border: 1px solid var(--cp-border);
+  border-radius: 5px; padding: 1px 5px; font-size: 0.9em;
+}
+
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; margin: 10px 0; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--cp-border); }
+th { color: var(--cp-text-muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+td.num, th.num { text-align: right; font-family: Consolas, "Courier New", monospace; }
+tr.good td { background: var(--cp-accent-soft); }
+
+.pill { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12.5px; font-weight: 600; }
+.pill.ok { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.bad { background: rgba(220,38,38,.14); color: var(--cp-danger); }
+.pill.warn { background: rgba(245,158,11,.16); color: var(--cp-warning); }
+
+.stat { text-align: center; }
+.stat .v { font-size: 38px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+.stat .v.accent { color: var(--cp-accent); }
+.stat .v.ok { color: var(--cp-success); }
+.stat .l { font-size: 13px; color: var(--cp-text-muted); margin-top: 4px; }
+
+.note {
+  border-left: 3px solid var(--cp-accent); background: var(--cp-accent-soft);
+  border-radius: 0 0.625rem 0.625rem 0; padding: 12px 16px; margin: 14px 0;
+}
+.note.warn { border-left-color: var(--cp-warning); background: rgba(245,158,11,.10); }
+.note.ok { border-left-color: var(--cp-success); background: rgba(22,163,74,.10); }
+
+ul { margin: 8px 0 12px; padding-left: 20px; }
+li { margin-bottom: 6px; }
+
+/* bars */
+.bars { margin-top: 10px; }
+.bar-row { display: grid; grid-template-columns: 78px 1fr 92px; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13.5px; }
+.bar-label { color: var(--cp-text-muted); font-family: Consolas, monospace; }
+.bar-track { background: var(--cp-surface-soft); border: 1px solid var(--cp-border); border-radius: 999px; height: 20px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 999px; transition: width .5s ease; }
+.bar-fill.a { background: var(--cp-border-strong); }
+.bar-fill.b { background: var(--cp-accent); }
+.bar-val { text-align: right; font-family: Consolas, monospace; font-weight: 600; }
+.legend { display: flex; gap: 18px; font-size: 13px; color: var(--cp-text-muted); margin-top: 12px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+/* flow diagram */
+.flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+.node {
+  flex: 1; min-width: 130px; background: var(--cp-surface); border: 1px solid var(--cp-border);
+  border-radius: 0.625rem; padding: 12px; text-align: center; font-size: 13.5px;
+}
+.node.accent { border-color: var(--cp-accent); background: var(--cp-accent-soft); }
+.node b { display: block; margin-bottom: 3px; }
+.node small { color: var(--cp-text-muted); }
+.arrow { display: flex; align-items: center; color: var(--cp-text-muted); font-size: 20px; }
+
+.replica-viz { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+.rep {
+  width: 34px; height: 44px; border-radius: 6px; border: 1px solid var(--cp-border);
+  background: var(--cp-surface-soft); display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-family: Consolas, monospace; color: var(--cp-text-muted);
+}
+.rep.on { background: var(--cp-accent-soft); border-color: var(--cp-accent); color: var(--cp-accent); font-weight: 700; }
+
+.footer-hint {
+  position: fixed; bottom: 14px; left: 0; right: 0; text-align: center;
+  font-size: 12.5px; color: var(--cp-text-soft); pointer-events: none;
+}
+kbd {
+  border: 1px solid var(--cp-border); border-bottom-width: 2px; border-radius: 5px;
+  padding: 1px 6px; font-size: 11.5px; background: var(--cp-surface); font-family: Consolas, monospace;
+}
+a { color: var(--cp-link); }
+
+/* overview */
+.overview { position: fixed; inset: 55px 0 0 0; background: var(--cp-bg); overflow-y: auto; padding: 24px 40px 60px; z-index: 40; display: none; }
+.overview.show { display: block; }
+.ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; max-width: 1120px; margin: 0 auto; }
+.ov-item { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 0.625rem; padding: 14px; cursor: pointer; }
+.ov-item:hover { border-color: var(--cp-accent); }
+.ov-item .n { font-size: 11.5px; color: var(--cp-accent); font-weight: 700; }
+.ov-item .t { font-size: 14px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">AI Models on <span>Azure Container Apps</span></div>
+  <div class="spacer"></div>
+  <button class="btn" id="ovBtn">Overview</button>
+  <button class="btn" id="themeBtn">Theme</button>
+  <button class="btn" id="prev">&larr;</button>
+  <div class="counter" id="counter">1 / 18</div>
+  <button class="btn primary" id="next">&rarr;</button>
+</div>
+<div class="progress"><div id="bar"></div></div>
+
+<div class="deck" id="deck">
+
+<!-- 1 TITLE -->
+<section class="slide active">
+  <div class="inner">
+    <span class="kicker">Demo walkthrough</span>
+    <h1>Running OSS vision models as APIs<br />on Azure Container Apps</h1>
+    <p class="sub">Why a YOLO API often handles <strong>one image at a time</strong>, the three bugs behind it,
+      the code that fixes it — and what the numbers actually say about scaling.</p>
+
+    <div class="grid g2" style="margin-top:26px">
+      <div class="card">
+        <h3 style="margin-top:0">Two demos, one architecture</h3>
+        <table>
+          <tr><td><strong>yolo-demo</strong><br /><small class="mono">Ultralytics yolov8n</small></td>
+              <td class="num">POST /predict</td></tr>
+          <tr><td><strong>ocr-demo</strong><br /><small class="mono">EasyOCR</small></td>
+              <td class="num">POST /ocr</td></tr>
+        </table>
+        <p style="font-size:13.5px;color:var(--cp-text-muted);margin:8px 0 0">
+          FastAPI + Docker + ACA, KEDA HTTP-concurrency autoscaling, 2 vCPU / 4 GiB replicas.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Everything here was measured</h3>
+        <div class="grid g2" style="gap:10px">
+          <div class="stat"><div class="v accent">9.5&times;</div><div class="l">OCR end-to-end throughput</div></div>
+          <div class="stat"><div class="v ok">108/108</div><div class="l">correctness checks passed</div></div>
+        </div>
+        <p style="font-size:13px;color:var(--cp-text-muted);margin:14px 0 0">
+          Live on ACA in <code class="i">swedencentral</code>, client over the public internet.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 2 THE PROBLEM -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">The symptom</span>
+    <h2>“YOLO only handles one image at a time”</h2>
+    <p class="sub">A real customer observation — and it is <em>not</em> a limitation of YOLO.</p>
+
+    <div class="card" style="border-left:4px solid var(--cp-accent)">
+      <p style="margin:0;font-size:18px">
+        It's caused by <strong>three independent bugs</strong> that almost every naive FastAPI
+        model wrapper contains. Two of them cost throughput. One of them silently returns
+        <strong>wrong answers</strong>.</p>
+    </div>
+
+    <div class="grid g3" style="margin-top:20px">
+      <div class="card">
+        <span class="pill bad">Bug 1</span>
+        <h3>Blocking the event loop</h3>
+        <p style="font-size:14px;margin:0">Throughput pinned to 1 request. Even <code class="i">/healthz</code> stops answering.</p>
+      </div>
+      <div class="card">
+        <span class="pill bad">Bug 2</span>
+        <h3>Model isn't thread-safe</h3>
+        <p style="font-size:14px;margin:0">Image A's results returned for image B. No error raised.</p>
+      </div>
+      <div class="card">
+        <span class="pill warn">Bug 3</span>
+        <h3>CPU oversubscription</h3>
+        <p style="font-size:14px;margin:0">Makes the "fix" look useless, so people revert it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3 BUG 1 -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Bug 1</span>
+    <h2>Blocking the asyncio event loop</h2>
+    <p class="sub">This is what everyone writes first.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <span class="pill bad">Broken</span>
+<pre><span class="k">@app.post</span>(<span class="hl">"/predict"</span>)
+<span class="k">async def</span> predict(file: UploadFile):
+    ...
+    results = <span class="hl">model.predict(image)</span>
+    <span class="c"># blocking, CPU-bound, ~150 ms</span>
+    <span class="k">return</span> results</pre>
+        <p style="font-size:14px;margin:8px 0 0">
+          <code class="i">async def</code> runs the handler <strong>on the event loop thread</strong>.
+          <code class="i">predict()</code> never yields, so for 150 ms the process cannot accept,
+          parse or answer <em>anything</em>.</p>
+      </div>
+      <div class="card">
+        <span class="pill ok">Fixed</span>
+<pre>raw = <span class="k">await</span> file.read()   <span class="c"># async I/O is fine</span>
+
+loop = asyncio.get_running_loop()
+result = <span class="k">await</span> loop.<span class="hl">run_in_executor</span>(
+    state[<span class="hl">"executor"</span>], _infer, image)</pre>
+        <p style="font-size:14px;margin:8px 0 0">
+          The CPU work moves to a worker thread; the loop stays free to accept more requests.</p>
+      </div>
+    </div>
+
+    <div class="note warn">
+      <strong>Side effect people miss:</strong> health probes time out under load, so ACA restarts
+      perfectly healthy replicas. It looks like random instability.
+    </div>
+  </div>
+</section>
+
+<!-- 4 BUG 2 -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Bug 2 — the dangerous one</span>
+    <h2>A <code class="i">YOLO</code> object is not thread-safe</h2>
+    <p class="sub">Now that requests run on threads, the obvious next step is wrong.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <span class="pill bad">Broken</span>
+<pre>model = YOLO(MODEL_NAME)   <span class="c"># ONE shared instance</span>
+
+<span class="k">def</span> _infer(image):
+    <span class="k">return</span> <span class="hl">model.predict(image)</span>
+    <span class="c"># data race across threads</span></pre>
+        <p style="font-size:14px;margin:8px 0 0">
+          A <code class="i">YOLO</code> instance lazily creates and <strong>reuses</strong> an internal
+          <code class="i">model.predictor</code> holding mutable per-call buffers. Two threads
+          overwrite each other.</p>
+      </div>
+      <div class="card">
+        <span class="pill ok">Fixed — one instance per worker</span>
+<pre>pool = queue.Queue()
+<span class="k">for</span> _ <span class="k">in</span> range(INFERENCE_WORKERS):
+    pool.put(YOLO(MODEL_NAME))
+
+<span class="k">def</span> _infer(image):
+    model = <span class="hl">pool.get()</span>      <span class="c"># borrow</span>
+    <span class="k">try</span>:
+        <span class="k">return</span> model.predict(image)
+    <span class="k">finally</span>:
+        <span class="hl">pool.put(model)</span>  <span class="c"># always return</span></pre>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>Why this one matters most:</strong> it doesn't crash and it doesn't log.
+      It silently returns the wrong detections under load — you'd only find out in production.
+      <code class="i">easyocr.Reader</code> has exactly the same problem.
+    </div>
+  </div>
+</section>
+
+<!-- 5 BUG 3 -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Bug 3 — the subtle one</span>
+    <h2>CPU oversubscription</h2>
+    <p class="sub">The reason people try threading, see no gain, and conclude “it doesn't work”.</p>
+
+    <div class="card">
+      <p>PyTorch is <em>already</em> internally parallel: one <code class="i">predict()</code> spreads its
+      matrix maths across every core it can see. Run 4 workers on a 2-core container and you get
+      4&times;N threads fighting over 2 cores — every request slows down while throughput barely moves.</p>
+<pre>torch.<span class="hl">set_num_threads</span>(TORCH_THREADS_PER_WORKER)   <span class="c"># default 1</span>
+
+<span class="c"># keep:  workers × threads  ≤  container vCPU</span></pre>
+    </div>
+
+    <div class="note warn">
+      <strong>Container gotcha:</strong> <code class="i">os.cpu_count()</code> inside a container reports the
+      <strong>host's</strong> cores, not the ACA limit. Never auto-size your pool from it —
+      the deploy script passes <code class="i">INFERENCE_WORKERS</code> explicitly.
+    </div>
+  </div>
+</section>
+
+<!-- 6 THE CODE -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">The fix, in full</span>
+    <h2>Four pieces of code</h2>
+    <p class="sub">All in <code class="i">yolo-demo/app/main.py</code> — the OCR demo is identical bar the model class.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <span class="pill ok">1 — startup</span>
+<pre>torch.set_num_threads(TORCH_THREADS_PER_WORKER)
+
+pool = queue.Queue()
+<span class="k">for</span> _ <span class="k">in</span> range(INFERENCE_WORKERS):
+    model = YOLO(MODEL_NAME)
+    model.predict(warm, verbose=<span class="k">False</span>)  <span class="c"># warm it</span>
+    pool.put(model)
+
+state[<span class="hl">"executor"</span>] = ThreadPoolExecutor(
+    max_workers=<span class="hl">INFERENCE_WORKERS</span>)</pre>
+      </div>
+      <div class="card">
+        <span class="pill ok">2 — endpoint never blocks</span>
+<pre>raw = <span class="k">await</span> file.read()
+image = Image.open(io.BytesIO(raw)).convert(<span class="hl">"RGB"</span>)
+
+loop = asyncio.get_running_loop()
+result = <span class="k">await</span> loop.<span class="hl">run_in_executor</span>(
+    state[<span class="hl">"executor"</span>], _infer, image)</pre>
+      </div>
+      <div class="card">
+        <span class="pill ok">3 — borrow / return</span>
+<pre><span class="k">def</span> _infer(image):
+    model = state[<span class="hl">"pool"</span>].get()
+    <span class="k">try</span>:
+        <span class="k">return</span> model.predict(image, verbose=<span class="k">False</span>)
+    <span class="k">finally</span>:
+        state[<span class="hl">"pool"</span>].put(model)</pre>
+      </div>
+      <div class="card">
+        <span class="pill ok">4 — ACA scale rule</span>
+<pre>--scale-rule-type http `
+--scale-rule-http-concurrency <span class="hl">$InferenceWorkers</span> `
+--min-replicas 0 --max-replicas 10</pre>
+        <p style="font-size:13.5px;color:var(--cp-text-muted);margin:8px 0 0">
+          Scale rule <strong>equals</strong> pool size, so a replica only ever accepts what it can genuinely run.</p>
+      </div>
+    </div>
+
+    <div class="note">
+      The whole trick is one invariant: <strong>executor threads == pool size</strong>.
+      At most N threads can be inside <code class="i">_infer</code>, and there are exactly N models —
+      so <code class="i">pool.get()</code> never waits and no two threads can share a model.
+    </div>
+  </div>
+</section>
+
+<!-- 7 ARCHITECTURE -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Request flow</span>
+    <h2>What happens inside one replica</h2>
+
+    <div class="card">
+      <div class="flow">
+        <div class="node"><b>Client</b><small>POST image</small></div>
+        <div class="arrow">&rarr;</div>
+        <div class="node accent"><b>Event loop</b><small>1 thread — never blocked</small></div>
+        <div class="arrow">&rarr;</div>
+        <div class="node"><b>Executor</b><small>N threads</small></div>
+        <div class="arrow">&rarr;</div>
+        <div class="node"><b>Model pool</b><small>N instances</small></div>
+      </div>
+      <table style="margin-top:14px">
+        <tr><td><span class="mono">1</span></td><td><code class="i">await file.read()</code></td><td>async I/O — safe on the loop</td></tr>
+        <tr><td><span class="mono">2</span></td><td><code class="i">run_in_executor(_infer)</code></td><td>loop is now <strong>free</strong> to accept more</td></tr>
+        <tr><td><span class="mono">3</span></td><td><code class="i">pool.get()</code></td><td>thread takes exclusive ownership of a model</td></tr>
+        <tr><td><span class="mono">4</span></td><td><code class="i">model.predict()</code></td><td>blocking — but off the event loop</td></tr>
+        <tr><td><span class="mono">5</span></td><td><code class="i">pool.put()</code> in <code class="i">finally</code></td><td>never leaks, even on exception</td></tr>
+      </table>
+    </div>
+
+    <div class="note warn">
+      Without the <code class="i">finally</code>, one exception permanently shrinks capacity —
+      and eventually deadlocks the service.
+    </div>
+  </div>
+</section>
+
+<!-- 8 PROOF -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Proof, not vibes</span>
+    <h2>Two counters that settle the argument</h2>
+    <p class="sub"><code class="i">GET /stats</code> — real responses from the deployed app, identical load,
+      only <code class="i">INFERENCE_WORKERS</code> changed.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <span class="pill bad">INFERENCE_WORKERS = 1</span>
+<pre>{ <span class="hl">"peak_in_flight": 8</span>,
+  <span class="hl">"peak_running": 1</span>,
+  "rss_mb": 463.8 }</pre>
+        <p style="font-size:14px;margin:6px 0 0">8 accepted, but only ever <strong>one</strong> executing.</p>
+      </div>
+      <div class="card">
+        <span class="pill ok">INFERENCE_WORKERS = 2</span>
+<pre>{ <span class="hl">"peak_in_flight": 8</span>,
+  <span class="hl">"peak_running": 2</span>,
+  "rss_mb": 495.6 }</pre>
+        <p style="font-size:14px;margin:6px 0 0">Same queue depth, <strong>two</strong> running in parallel.</p>
+      </div>
+    </div>
+
+    <table style="margin-top:18px">
+      <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+      <tr><td><code class="i">peak_in_flight</code></td><td>requests accepted — queued <em>or</em> executing</td></tr>
+      <tr class="good"><td><code class="i">peak_running</code></td><td>requests actually inside <code class="i">predict()</code> — <strong>true parallelism</strong>, can never exceed pool size</td></tr>
+      <tr><td><code class="i">queue_wait_ms</code></td><td>per-response: time spent waiting for a free worker</td></tr>
+    </table>
+
+    <div class="note">
+      A large gap between the two means requests are <strong>queueing</strong> — the replica is
+      saturated and ACA should scale out. That's the bridge from "scale up" to "scale out".
+    </div>
+  </div>
+</section>
+
+<!-- 9 CORRECTNESS -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Test #1 — the one that matters</span>
+    <h2>Does every image get its <em>own</em> right answer?</h2>
+    <p class="sub">Each image carries a unique verifiable marker; all sent concurrently; every response
+      checked against the image that produced it.</p>
+
+    <table>
+      <thead><tr><th>Scenario</th><th class="num">Images</th><th class="num">Conc.</th><th class="num">Correct</th><th class="num">Wrong</th><th class="num">peak_running</th></tr></thead>
+      <tr><td>YOLO — 1 replica, 1 worker</td><td class="num">24</td><td class="num">8</td><td class="num">24/24</td><td class="num">0</td><td class="num">1</td></tr>
+      <tr class="good"><td>YOLO — 1 replica, 2 workers</td><td class="num">24</td><td class="num">8</td><td class="num">24/24</td><td class="num">0</td><td class="num">2</td></tr>
+      <tr class="good"><td>YOLO — <strong>10 replicas</strong>, 2 workers</td><td class="num">60</td><td class="num">20</td><td class="num">60/60</td><td class="num">0</td><td class="num">2 / replica</td></tr>
+      <tr><td>OCR — 1 replica, 1 worker</td><td class="num">24</td><td class="num">8</td><td class="num">24/24</td><td class="num">0</td><td class="num">1</td></tr>
+      <tr class="good"><td>OCR — 1 replica, 2 workers</td><td class="num">24</td><td class="num">8</td><td class="num">24/24</td><td class="num">0</td><td class="num">2</td></tr>
+    </table>
+
+    <div class="note ok">
+      <strong>108 / 108 correct, zero cross-contamination.</strong> Isolation is guaranteed by
+      construction — N threads, N models — not by timing luck.
+    </div>
+  </div>
+</section>
+
+<!-- 10 YOLO PERF -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Test #2 — YOLO, 1 replica, 2 vCPU</span>
+    <h2>1 worker vs 2 workers</h2>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">Throughput (RPS)</h3>
+        <div class="bars" id="yoloRps"></div>
+        <div class="legend"><span><i style="background:var(--cp-border-strong)"></i>1 worker</span><span><i style="background:var(--cp-accent)"></i>2 workers</span></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Median latency (p50, ms — lower is better)</h3>
+        <div class="bars" id="yoloP50"></div>
+        <div class="legend"><span><i style="background:var(--cp-border-strong)"></i>1 worker</span><span><i style="background:var(--cp-accent)"></i>2 workers</span></div>
+      </div>
+    </div>
+
+    <div class="grid g3" style="margin-top:18px">
+      <div class="card stat"><div class="v">+20%</div><div class="l">throughput gain</div></div>
+      <div class="card stat"><div class="v accent">5.8&times;</div><div class="l">better p50 @ concurrency 8</div></div>
+      <div class="card stat"><div class="v" style="color:var(--cp-warning)">162&rarr;198<span style="font-size:16px"> ms</span></div><div class="l">inference_ms inflated &mdash; CPU split</div></div>
+    </div>
+
+    <div class="note warn">
+      <strong>Be honest about this one.</strong> The 1-worker curve is flat from concurrency 2 onward —
+      that's the "one image at a time" symptom. But the fix mainly buys <strong>latency</strong>, not
+      throughput: <code class="i">inference_ms</code> rose 162 &rarr; 198 ms, so the two workers are
+      splitting the same hard 2 vCPU quota.
+    </div>
+  </div>
+</section>
+
+<!-- 11 OCR PERF -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Test #2 — OCR, 1 replica, 2 vCPU</span>
+    <h2>The same test, a very different answer</h2>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">Throughput (RPS)</h3>
+        <div class="bars" id="ocrRps"></div>
+        <div class="legend"><span><i style="background:var(--cp-border-strong)"></i>1 worker</span><span><i style="background:var(--cp-accent)"></i>2 workers</span></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Median latency (p50, ms — lower is better)</h3>
+        <div class="bars" id="ocrP50"></div>
+        <div class="legend"><span><i style="background:var(--cp-border-strong)"></i>1 worker</span><span><i style="background:var(--cp-accent)"></i>2 workers</span></div>
+      </div>
+    </div>
+
+    <div class="grid g3" style="margin-top:18px">
+      <div class="card stat"><div class="v accent">+90%</div><div class="l">throughput gain</div></div>
+      <div class="card stat"><div class="v accent">1.9&times;</div><div class="l">better p50 at every level</div></div>
+      <div class="card stat"><div class="v ok">2350&rarr;2350<span style="font-size:16px"> ms</span></div><div class="l">inference_ms unchanged &mdash; free CPU</div></div>
+    </div>
+
+    <div class="note ok">
+      <strong>1 worker is perfectly flat at ~0.41 RPS</strong> at every concurrency, and p50 doubles with
+      every doubling of load: 2.4s &rarr; 4.6s &rarr; 9.4s &rarr; 18.6s. Textbook serialization —
+      the cleanest version of this demo.
+    </div>
+  </div>
+</section>
+
+<!-- 12 WHY DIFFERENT -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">The insight to take away</span>
+    <h2>Why did OCR gain 90% and YOLO only 20%?</h2>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">Look at <code class="i">inference_ms</code></h3>
+        <table>
+          <thead><tr><th>Model</th><th class="num">1 worker</th><th class="num">2 workers</th><th>Verdict</th></tr></thead>
+          <tr><td>YOLO <span class="mono">yolov8n</span></td><td class="num">162 ms</td><td class="num">198 ms</td><td><span class="pill warn">inflated</span></td></tr>
+          <tr class="good"><td>EasyOCR</td><td class="num">2350 ms</td><td class="num">2350 ms</td><td><span class="pill ok">unchanged</span></td></tr>
+        </table>
+        <p style="font-size:14px;margin:10px 0 0">
+          If per-inference time <strong>stays flat</strong>, the extra worker used genuinely idle CPU —
+          real parallelism. If it <strong>inflates</strong>, you're just splitting the same CPU.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Why they differ</h3>
+        <ul style="font-size:14.5px">
+          <li><strong>YOLO</strong> is one big, well-parallelised convolution stack — a single forward
+            pass already keeps both cores busy.</li>
+          <li><strong>EasyOCR</strong> has long sequential phases (detect &rarr; crop &rarr; recognise)
+            with limited matrix parallelism, leaving cores idle.</li>
+        </ul>
+        <div class="note" style="margin-bottom:0">
+          <strong>Rule of thumb:</strong> the slower and less CPU-saturating a single inference is,
+          the more in-replica parallelism pays. <strong>Measure <code class="i">inference_ms</code> at
+          1 vs N workers before choosing.</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 13 SCALE OUT -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Test #3 — the main event</span>
+    <h2>Scaling out with KEDA</h2>
+    <p class="sub">Sustained load, three identical passes, while ACA added replicas.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">YOLO &mdash; concurrency 24</h3>
+        <table>
+          <thead><tr><th>Pass</th><th class="num">Replicas</th><th class="num">RPS</th><th class="num">p50</th></tr></thead>
+          <tr><td>scaling up</td><td class="num">2</td><td class="num">5.85</td><td class="num">270 ms</td></tr>
+          <tr><td>scaling</td><td class="num">5</td><td class="num">14.99</td><td class="num">561 ms</td></tr>
+          <tr class="good"><td>settled</td><td class="num">5</td><td class="num">27.38</td><td class="num">567 ms</td></tr>
+          <tr class="good"><td>fully scaled</td><td class="num">10</td><td class="num">25.21</td><td class="num">315 ms</td></tr>
+        </table>
+        <div class="replica-viz" id="repYolo"></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">OCR &mdash; concurrency 20</h3>
+        <table>
+          <thead><tr><th>Pass</th><th class="num">Replicas</th><th class="num">RPS</th><th class="num">p50</th></tr></thead>
+          <tr><td>scaling up</td><td class="num">6</td><td class="num">0.83</td><td class="num">22 880 ms</td></tr>
+          <tr class="good"><td>fully scaled</td><td class="num">10</td><td class="num">3.91</td><td class="num">2 705 ms</td></tr>
+          <tr><td>steady</td><td class="num">10</td><td class="num">3.50</td><td class="num">3 356 ms</td></tr>
+        </table>
+        <div class="replica-viz" id="repOcr"></div>
+      </div>
+    </div>
+
+    <div class="grid g3" style="margin-top:16px">
+      <div class="card stat"><div class="v accent">4.7&times;</div><div class="l">throughput, both models</div></div>
+      <div class="card stat"><div class="v ok">8.5&times;</div><div class="l">better OCR p50 (22.9s &rarr; 2.7s)</div></div>
+      <div class="card stat"><div class="v accent">9.5&times;</div><div class="l">OCR end-to-end: 0.41 &rarr; 3.91 RPS</div></div>
+    </div>
+
+    <div class="note">
+      <strong>This is the headline:</strong> in-replica parallelism removes the architectural limit and
+      fixes correctness — but <strong>scale-out is the axis that multiplies throughput.</strong>
+    </div>
+  </div>
+</section>
+
+<!-- 14 ALIGNMENT -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Configuration</span>
+    <h2>Align the pool with the scale rule</h2>
+
+    <div class="card" style="text-align:center;padding:22px">
+      <div style="font-size:24px;font-family:Consolas,monospace">
+        scale-rule concurrency &nbsp;<span style="color:var(--cp-accent)">=</span>&nbsp; INFERENCE_WORKERS
+      </div>
+    </div>
+
+    <table style="margin-top:16px">
+      <thead><tr><th>Configuration</th><th>What happens</th></tr></thead>
+      <tr><td><strong>Rule &gt; workers</strong><br /><small>rule 10, workers 2</small></td>
+          <td>Replica accepts 10 concurrent but runs 2. The other 8 pile into <code class="i">queue_wait_ms</code>;
+              latency balloons and <strong>ACA never scales out</strong> — the replica looks like it's coping.</td></tr>
+      <tr><td><strong>Rule &lt; workers</strong><br /><small>rule 1, workers 2</small></td>
+          <td>ACA adds replicas while each existing one is half idle. You pay for unused CPU.</td></tr>
+      <tr class="good"><td><strong>Rule = workers</strong></td>
+          <td>A replica takes exactly what it can genuinely run in parallel; the moment it would
+              queue, KEDA adds a replica.</td></tr>
+    </table>
+
+    <div class="grid g2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">Capacity</h3>
+        <p class="mono" style="font-size:15px;margin:0">
+          max concurrent = INFERENCE_WORKERS &times; maxReplicas<br />
+          <span style="color:var(--cp-accent)">= 2 &times; 10 = 20</span></p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">The simple alternative</h3>
+        <p style="font-size:14px;margin:0 0 8px">“One replica per inference” is a perfectly valid design —
+          simplest mental model, no in-process threading at all.</p>
+        <pre style="margin:0">-InferenceWorkers 1 -ConcurrentRequests 1</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 15 MEMORY -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">“But YOLO uses lots of RAM”</span>
+    <h2>Measured memory, not guesses</h2>
+    <p class="sub">From <code class="i">rss_mb</code> in <code class="i">/stats</code> — what ACA counts against the limit.</p>
+
+    <table>
+      <thead><tr><th></th><th class="num">YOLO (yolov8n)</th><th class="num">OCR (EasyOCR)</th></tr></thead>
+      <tr><td>Baseline, 1 worker</td><td class="num">425.8 MB</td><td class="num">492.2 MB</td></tr>
+      <tr><td>Baseline, 2 workers</td><td class="num">427.4 MB</td><td class="num">576.6 MB</td></tr>
+      <tr class="good"><td><strong>Cost of 2nd pooled instance</strong></td><td class="num"><strong>+1.6 MB</strong></td><td class="num"><strong>+84.4 MB</strong></td></tr>
+      <tr><td>Under load, 2 workers</td><td class="num">495.6 MB</td><td class="num">837–947 MB</td></tr>
+      <tr class="good"><td><strong>Per concurrent inference</strong></td><td class="num"><strong>~34 MB</strong></td><td class="num"><strong>~130–185 MB</strong></td></tr>
+    </table>
+
+    <div class="grid g2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="margin-top:0">Three very different terms</h3>
+        <ul style="font-size:14.5px;margin-bottom:0">
+          <li><strong>Fixed runtime</strong> (~424 MB torch + OpenCV) — dominates, paid once.</li>
+          <li><strong>Weights &times; N</strong> — the part people fear; for a nano model it's negligible.</li>
+          <li><strong>Activations &times; concurrency</strong> — the real per-request cost, and it exists
+            whether you pool or not.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">So: can you run several in one replica?</h3>
+        <p style="font-size:14.5px;margin:0 0 8px"><strong>Yes.</strong> On 4 GiB, YOLO has room for
+          ~100 concurrent inferences, OCR ~15–20.</p>
+        <div class="note ok" style="margin:0">
+          <strong>CPU binds long before RAM</strong> for both models — which is exactly why
+          <code class="i">INFERENCE_WORKERS = 2</code> on 2 vCPU is the right call.
+        </div>
+      </div>
+    </div>
+
+    <p style="font-size:13.5px;color:var(--cp-text-muted);margin-top:14px">
+      This flips for large models: a 2nd <span class="mono">yolov8x</span> costs ~272 MB; a 2nd 7B LLM
+      costs ~14 GB — there you share the model and scale out instead.</p>
+  </div>
+</section>
+
+<!-- 16 GOTCHAS -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Things that will bite you</span>
+    <h2>Three findings worth showing</h2>
+
+    <div class="card">
+      <span class="pill warn">Gotcha 1</span>
+      <h3 style="margin-top:8px">ACA drops in-flight connections while adding replicas</h3>
+      <table>
+        <tr><td>No client retries</td><td class="num"><span class="pill bad">63 requests lost</span></td></tr>
+        <tr class="good"><td>2 connection-level retries</td><td class="num"><span class="pill ok">200 / 200 succeeded</span></td></tr>
+      </table>
+      <p style="font-size:14px;margin:8px 0 0">Transport errors, <strong>not</strong> HTTP 5xx — the app logged nothing.
+        Retry <code class="i">connect</code> only (<code class="i">read=0</code>), so a request that actually reached the
+        model is never silently repeated. Demo it with <code class="i">bench.py --retries 0</code>.</p>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <span class="pill warn">Gotcha 2</span>
+      <h3 style="margin-top:8px">Our own OCR test reported 21/24 failures — and was wrong</h3>
+<pre>image 0:  expected <span class="hl">'CODE0000'</span>, got <span class="hl">'CODEOOOO'</span>
+image 7:  expected 'CODE0007', got 'CODEOOO7'
+image 22: expected 'CODE0022', got 'CODEOO22'</pre>
+      <p style="font-size:14px;margin:6px 0 0">Every answer belonged to <strong>its own image</strong> —
+        EasyOCR just read <code class="i">0</code> as <code class="i">O</code>. Glyph ambiguity, not a threading bug.</p>
+      <div class="note" style="margin-bottom:0">
+        <strong>Lesson:</strong> assert on <strong>identity</strong> (which input produced this result?),
+        never on model <strong>accuracy</strong> — otherwise you'll chase a threading ghost that doesn't exist.
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <span class="pill warn">Gotcha 3</span>
+      <h3 style="margin-top:8px">A shared <code class="i">requests.Session</code> caps at 10 connections</h3>
+      <p style="font-size:14px;margin:0">Above that it throws <code class="i">SSLEOFError</code> — which looks
+        exactly like a server fault. Use one session per thread. This cost us a debugging cycle.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 17 DEMO SCRIPT -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Running it live</span>
+    <h2>Demo script</h2>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">Order of the story</h3>
+        <ol style="font-size:14.5px;padding-left:20px">
+          <li><strong>Correctness first</strong> — 24 images, all correct. Parallelism is <em>safe</em>.</li>
+          <li><strong>Scale to zero</strong> — 0 replicas, one request, show the cold start.</li>
+          <li><strong>Saturate one replica</strong> — <code class="i">queue_wait_ms</code> grows, <code class="i">inference_ms</code> flat.</li>
+          <li><strong>The bug</strong> — <code class="i">WORKERS=1</code>: <code class="i">peak_running</code> stuck at 1.</li>
+          <li><strong>The fix</strong> — <code class="i">WORKERS=2</code>: <code class="i">peak_running</code> = 2, p50 collapses.</li>
+          <li><strong>The caveat</strong> — throughput only +20% on YOLO. Segue to scale-out.</li>
+          <li><strong>Scale out</strong> — replicas 1&rarr;10, RPS 5.9&rarr;27.</li>
+          <li><strong>The rough edge</strong> — <code class="i">--retries 0</code> drops requests.</li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Commands</h3>
+<pre><span class="c"># correctness</span>
+python correctness.py --host $app `
+  --endpoint /predict --count 24 --concurrency 8
+
+<span class="c"># concurrency sweep</span>
+python bench.py --host $app `
+  --endpoint /predict --levels 1,2,4,8
+
+<span class="c"># flip parallelism live (new revision, ~1 min)</span>
+az containerapp update -n yolo-demo -g $rg `
+  --set-env-vars <span class="hl">INFERENCE_WORKERS=1</span>
+
+<span class="c"># server-side truth</span>
+Invoke-RestMethod "$app/stats"
+
+<span class="c"># replica count</span>
+(az containerapp replica list -n yolo-demo `
+  -g $rg -o json | ConvertFrom-Json).Count</pre>
+        <div class="note warn" style="margin-bottom:0">
+          Changing an env var creates a <strong>new revision</strong>. Always confirm
+          <code class="i">inference_workers</code> from <code class="i">/</code> before trusting a benchmark.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 18 SUMMARY -->
+<section class="slide">
+  <div class="inner">
+    <span class="kicker">Wrap-up</span>
+    <h2>What to remember</h2>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="margin-top:0">The engineering</h3>
+        <ul style="font-size:14.5px;margin-bottom:0">
+          <li>Never run blocking inference inside <code class="i">async def</code>.</li>
+          <li>High-level model wrappers (YOLO, EasyOCR, PaddleOCR, HF <code class="i">pipeline</code>)
+            are <strong>not thread-safe</strong> — one instance per worker.</li>
+          <li>Low-level engines (ONNX Runtime, bare <code class="i">torch</code> under
+            <code class="i">no_grad</code>) <strong>are</strong> — share and tune threads instead.</li>
+          <li>Cap torch threads; never size a pool from <code class="i">os.cpu_count()</code> in a container.</li>
+          <li>Keep <strong>scale rule == pool size</strong>.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">The numbers</h3>
+        <table>
+          <tr><td>Correctness</td><td class="num"><span class="pill ok">108/108</span></td></tr>
+          <tr><td>Scale up (OCR)</td><td class="num">+90% RPS, 1.9&times; p50</td></tr>
+          <tr><td>Scale up (YOLO)</td><td class="num">+20% RPS, 5.8&times; p50</td></tr>
+          <tr><td>Scale out</td><td class="num">4.7&times; both models</td></tr>
+          <tr class="good"><td><strong>OCR end-to-end</strong></td><td class="num"><strong>9.5&times;</strong></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="note" style="margin-top:18px">
+      <strong>The one-liner for your team:</strong> fixing concurrency inside the replica makes the API
+      <em>correct and responsive</em>; scaling replicas on ACA makes it <em>fast</em>. You need both,
+      and they must be configured to agree.
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Repo</h3>
+      <p style="margin:0"><a href="https://github.com/yelghali/ai-model-on-aca">github.com/yelghali/ai-model-on-aca</a>
+        &nbsp;·&nbsp; <span class="mono">yolo-demo/</span> <span class="mono">ocr-demo/</span>
+        <span class="mono">loadtest/</span> <span class="mono">deploy/</span></p>
+      <p style="font-size:13.5px;color:var(--cp-text-muted);margin:10px 0 0">
+        ⚠️ Both apps currently run with <code class="i">min-replicas 1</code> — they bill continuously.
+        Run <code class="i">deploy/cleanup.ps1</code> when finished.</p>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div class="overview" id="overview"><div class="ov-grid" id="ovGrid"></div></div>
+
+<div class="footer-hint">
+  <kbd>&larr;</kbd> <kbd>&rarr;</kbd> navigate &nbsp;·&nbsp; <kbd>O</kbd> overview &nbsp;·&nbsp;
+  <kbd>T</kbd> theme &nbsp;·&nbsp; <kbd>F</kbd> fullscreen
+</div>
+
+<script>
+const slides = Array.from(document.querySelectorAll('.slide'));
+const titles = ["Title","The symptom","Bug 1 — event loop","Bug 2 — thread safety","Bug 3 — CPU",
+  "The code","Request flow","Proof: /stats","Correctness results","YOLO 1 vs 2 workers",
+  "OCR 1 vs 2 workers","Why they differ","Scaling out","Scale rule alignment","Memory",
+  "Gotchas","Demo script","Summary"];
+let i = 0;
+
+const counter = document.getElementById('counter');
+const bar = document.getElementById('bar');
+const overview = document.getElementById('overview');
+
+function show(n, animate) {
+  i = Math.max(0, Math.min(slides.length - 1, n));
+  slides.forEach((s, k) => s.classList.toggle('active', k === i));
+  counter.textContent = (i + 1) + ' / ' + slides.length;
+  bar.style.width = ((i + 1) / slides.length * 100) + '%';
+  slides[i].scrollTop = 0;
+  if (animate !== false) drawCharts();
+}
+
+document.getElementById('next').onclick = () => show(i + 1);
+document.getElementById('prev').onclick = () => show(i - 1);
+document.getElementById('themeBtn').onclick = toggleTheme;
+document.getElementById('ovBtn').onclick = toggleOverview;
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+}
+function toggleOverview() { overview.classList.toggle('show'); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); show(i + 1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(i - 1); }
+  else if (e.key === 'Home') show(0);
+  else if (e.key === 'End') show(slides.length - 1);
+  else if (e.key.toLowerCase() === 't') toggleTheme();
+  else if (e.key.toLowerCase() === 'o') toggleOverview();
+  else if (e.key.toLowerCase() === 'f') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  } else if (e.key === 'Escape') overview.classList.remove('show');
+});
+
+// overview grid
+const ovGrid = document.getElementById('ovGrid');
+titles.forEach((t, k) => {
+  const d = document.createElement('div');
+  d.className = 'ov-item';
+  d.innerHTML = '<div class="n">' + String(k + 1).padStart(2, '0') + '</div><div class="t">' + t + '</div>';
+  d.onclick = () => { show(k); overview.classList.remove('show'); };
+  ovGrid.appendChild(d);
+});
+
+// ---- charts (measured data) ----
+const data = {
+  yoloRps:  { max: 8,     rows: [["conc 1",4.55,4.39],["conc 2",6.05,7.28],["conc 4",5.95,7.26],["conc 8",5.67,5.68]], fmt: v => v.toFixed(2) },
+  yoloP50:  { max: 1400,  rows: [["conc 1",216,221],["conc 2",327,251],["conc 4",653,252],["conc 8",1326,229]],        fmt: v => v + " ms" },
+  ocrRps:   { max: 0.8,   rows: [["conc 1",0.41,0.39],["conc 2",0.42,0.54],["conc 4",0.41,0.59],["conc 8",0.38,0.72]], fmt: v => v.toFixed(2) },
+  ocrP50:   { max: 19000, rows: [["conc 1",2416,2368],["conc 2",4616,2511],["conc 4",9430,4978],["conc 8",18616,9741]],fmt: v => (v/1000).toFixed(1) + " s" }
+};
+
+function drawCharts() {
+  Object.keys(data).forEach(id => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.done) return;
+    const d = data[id];
+    el.innerHTML = d.rows.map(([label, a, b]) => `
+      <div class="bar-row">
+        <span class="bar-label">${label}</span>
+        <div class="bar-track"><div class="bar-fill a" style="width:${(a / d.max * 100).toFixed(1)}%"></div></div>
+        <span class="bar-val">${d.fmt(a)}</span>
+      </div>
+      <div class="bar-row" style="margin-bottom:14px">
+        <span class="bar-label"></span>
+        <div class="bar-track"><div class="bar-fill b" style="width:${(b / d.max * 100).toFixed(1)}%"></div></div>
+        <span class="bar-val" style="color:var(--cp-accent)">${d.fmt(b)}</span>
+      </div>`).join('');
+    el.dataset.done = "1";
+  });
+}
+
+// replica visualisations
+function replicas(id, on, total) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  let h = '';
+  for (let k = 1; k <= total; k++) h += `<div class="rep ${k <= on ? 'on' : ''}">${k}</div>`;
+  el.innerHTML = h;
+}
+replicas('repYolo', 10, 10);
+replicas('repOcr', 10, 10);
+
+show(0);
+</script>
+</body>
+</html>

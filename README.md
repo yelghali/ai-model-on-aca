@@ -20,6 +20,10 @@ Both apps expose the same operational surface so the demo story is identical:
 > **Note:** YOLO does *object detection* (boxes around objects). EasyOCR does *OCR* (reads text).
 > For a scaling/load-test demo the task doesn't matter — pick whichever your team lands on, or demo both.
 
+> 📊 **Presenting this?** Open [`presentation.html`](presentation.html) — an 18-slide interactive
+> walkthrough of the same material, built to be projected. Arrow keys navigate, `O` for slide
+> overview, `T` toggles light/dark, `F` fullscreen. Self-contained, no build step, no network.
+
 ---
 
 ## TL;DR — the code that makes YOLO run several inferences at once
@@ -609,6 +613,7 @@ even more important here than for YOLO.
 
 ```
 ai-model-on-aca/
+├── presentation.html   # 18-slide interactive walkthrough (open in any browser)
 ├── yolo-demo/          # YOLO object detection, FastAPI-wrapped
 │   ├── app/main.py     #   <- model pool + event-loop offload
 │   ├── requirements.txt
