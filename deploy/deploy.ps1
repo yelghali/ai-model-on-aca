@@ -52,6 +52,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $env:AZURE_CORE_ONLY_SHOW_ERRORS = 'true'
+# `az acr build` streams the build log through colorama. On a console using a
+# legacy code page (e.g. cp1252 on a French Windows) any non-ASCII byte in the
+# build output crashes the CLI with UnicodeEncodeError *after* the image has
+# already been built and pushed. Force UTF-8 so the stream cannot kill the run.
+$env:PYTHONIOENCODING = 'utf-8'
 
 if ($ConcurrentRequests -le 0) { $ConcurrentRequests = $InferenceWorkers }
 if (-not $EnvLocation) { $EnvLocation = $Location }

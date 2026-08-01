@@ -27,7 +27,7 @@ Endpoints:
   GET  /         -> service info
   GET  /healthz  -> liveness/readiness probe (used by ACA)
   GET  /stats    -> live concurrency counters (useful when narrating a load test)
-  POST /predict  -> run detection on an uploaded image
+  POST /predict  -> run detection on one OR MANY uploaded images (batch)
 """
 import asyncio
 import io
@@ -38,6 +38,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from typing import List
 
 import torch
 import psutil
@@ -45,9 +46,14 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image
 from ultralytics import YOLO
 
+# Wall-clock at import: everything before `ready` is this replica's cold start.
+PROCESS_START = time.time()
+
 MODEL_NAME = os.getenv("YOLO_MODEL", "yolov8n.pt")
 CONF = float(os.getenv("YOLO_CONF", "0.25"))
 IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
+# Upper bound on images per request, so one caller cannot monopolise a worker.
+MAX_BATCH = int(os.getenv("MAX_BATCH", "32"))
 
 # How many inferences may run in parallel inside ONE replica.
 INFERENCE_WORKERS = int(os.getenv("INFERENCE_WORKERS", str(os.cpu_count() or 2)))
@@ -57,7 +63,10 @@ TORCH_THREADS_PER_WORKER = int(os.getenv("TORCH_THREADS_PER_WORKER", "1"))
 
 REPLICA = os.getenv("CONTAINER_APP_REPLICA_NAME") or socket.gethostname()
 
-state: dict = {"pool": None, "executor": None, "ready": False, "rss_baseline_mb": None}
+state: dict = {
+    "pool": None, "executor": None, "ready": False,
+    "rss_baseline_mb": None, "startup_ms": None,
+}
 
 # Live counters so the demo can show queueing vs. real parallelism.
 #   in_flight = accepted requests (queued OR executing)
@@ -118,6 +127,8 @@ async def lifespan(app: FastAPI):
     state["rss_baseline_mb"] = round(
         psutil.Process().memory_info().rss / 1024 / 1024, 1
     )
+    # Cold start: import -> weights loaded -> warmed -> ready to serve.
+    state["startup_ms"] = round((time.time() - PROCESS_START) * 1000, 1)
     state["ready"] = True
     yield
     state["ready"] = False
@@ -134,22 +145,9 @@ app = FastAPI(
 )
 
 
-def _infer(image: Image.Image) -> dict:
-    """Runs on a worker thread with its own dedicated model instance."""
-    pool: "queue.Queue[YOLO]" = state["pool"]
-    model = pool.get()  # borrow — guarantees no two threads share a model
-    _start_running()
-    try:
-        t0 = time.perf_counter()
-        results = model.predict(image, imgsz=IMGSZ, conf=CONF, verbose=False)
-        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-    finally:
-        _stop_running()
-        pool.put(model)  # always return it, even on failure
-
-    r = results[0]
+def _boxes(r) -> list:
     names = r.names
-    detections = [
+    return [
         {
             "label": names.get(int(b.cls[0]), str(int(b.cls[0]))),
             "confidence": round(float(b.conf[0]), 4),
@@ -157,7 +155,29 @@ def _infer(image: Image.Image) -> dict:
         }
         for b in r.boxes
     ]
-    return {"detections": detections, "inference_ms": elapsed_ms}
+
+
+def _infer_batch(images: List[Image.Image]) -> dict:
+    """Runs on a worker thread with its own dedicated model instance.
+
+    The whole batch is handed to ONE borrowed model. Ultralytics batches natively,
+    so N images cost far less than N separate calls, and because the model is
+    borrowed from the pool no other thread can touch its predictor buffers while
+    the batch is in flight.
+    """
+    pool: "queue.Queue[YOLO]" = state["pool"]
+    model = pool.get()  # borrow — guarantees no two threads share a model
+    _start_running()
+    try:
+        t0 = time.perf_counter()
+        results = model.predict(images, imgsz=IMGSZ, conf=CONF, verbose=False)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+    finally:
+        _stop_running()
+        pool.put(model)  # always return it, even on failure
+
+    # results are returned in the same order as the inputs.
+    return {"images": [_boxes(r) for r in results], "inference_ms": elapsed_ms}
 
 
 @app.get("/")
@@ -170,8 +190,9 @@ def info():
         "replica": REPLICA,
         "inference_workers": INFERENCE_WORKERS,
         "torch_threads_per_worker": TORCH_THREADS_PER_WORKER,
+        "max_batch": MAX_BATCH,
         "endpoints": {
-            "predict": "POST /predict",
+            "predict": "POST /predict (one or many 'file' parts)",
             "health": "GET /healthz",
             "stats": "GET /stats",
         },
@@ -191,6 +212,8 @@ def stats():
     return {
         "replica": REPLICA,
         "inference_workers": INFERENCE_WORKERS,
+        # Cold start of THIS replica: import -> weights -> warm -> ready.
+        "startup_ms": state["startup_ms"],
         # queued OR executing
         "in_flight": snapshot["in_flight"],
         "peak_in_flight": snapshot["peak_in_flight"],
@@ -207,35 +230,58 @@ def stats():
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(file: List[UploadFile] = File(...)):
+    """Detect on one or many images.
+
+    Send one `file` part for a single image, or repeat the `file` part to submit a
+    batch. The batch is processed by a single pooled model, so `images[i]` always
+    corresponds to the i-th uploaded file.
+    """
     if not state["ready"]:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
+    if not file:
+        raise HTTPException(status_code=400, detail="Upload at least one image")
+    if len(file) > MAX_BATCH:
+        raise HTTPException(
+            status_code=413, detail=f"Batch too large: max {MAX_BATCH} images"
+        )
 
-    if not (file.content_type or "").startswith("image/"):
-        raise HTTPException(status_code=400, detail="Upload an image file")
-
-    raw = await file.read()
-    try:
-        image = Image.open(io.BytesIO(raw)).convert("RGB")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Could not decode image")
+    images = []
+    for f in file:
+        if not (f.content_type or "").startswith("image/"):
+            raise HTTPException(status_code=400, detail="Upload image files only")
+        raw = await f.read()
+        try:
+            images.append(Image.open(io.BytesIO(raw)).convert("RGB"))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Could not decode {f.filename}")
 
     _acquire()
     t0 = time.perf_counter()
     try:
         loop = asyncio.get_running_loop()
         # Offload to the pool: the event loop stays free to accept more requests.
-        result = await loop.run_in_executor(state["executor"], _infer, image)
+        result = await loop.run_in_executor(state["executor"], _infer_batch, images)
     finally:
         _release()
     total_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-    return {
-        "count": len(result["detections"]),
-        "detections": result["detections"],
+    n = len(images)
+    per_image = [{"count": len(d), "detections": d} for d in result["images"]]
+    body = {
+        "batch_size": n,
+        "images": per_image,
         "inference_ms": result["inference_ms"],
+        "inference_ms_per_image": round(result["inference_ms"] / n, 1),
         # total_ms - inference_ms = time spent waiting for a free worker.
         "total_ms": total_ms,
+        "total_ms_per_image": round(total_ms / n, 1),
         "queue_wait_ms": round(total_ms - result["inference_ms"], 1),
         "replica": REPLICA,
+        "startup_ms": state["startup_ms"],
     }
+    if n == 1:
+        # Backwards compatible with the single-image callers.
+        body["count"] = per_image[0]["count"]
+        body["detections"] = per_image[0]["detections"]
+    return body

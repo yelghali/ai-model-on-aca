@@ -23,6 +23,9 @@ Usage:
 
   # GPU deployment
   python soak.py --host https://<fqdn> --profile gpu-t4 --hours 2
+
+  # YOLO detection deployment
+  python soak.py --host https://<fqdn> --model yolo --profile cpu-2 --hours 2
 """
 import argparse
 import csv
@@ -88,6 +91,37 @@ def _token(n: int) -> str:
     return "".join(reversed(out))
 
 
+# --- per-model correctness -------------------------------------------------
+# Both checks assert IDENTITY (did this image's own result come back?), never
+# model accuracy. A returned result that belongs to a different input is the
+# cross-contamination bug this whole demo is about.
+
+def _check_paddle(exp, item):
+    """The page's unique OCR token must appear in its own text."""
+    return _norm(exp) in _norm(item.get("text", ""))
+
+
+def _check_yolo(exp, item, tol=60.0):
+    """The largest box's X centre must match the ellipse we drew in THIS image.
+
+    Returns None when the model detected nothing at all: that is an accuracy
+    miss, not contamination, so it is counted separately.
+    """
+    dets = item.get("detections", [])
+    if not dets:
+        return None
+    big = max(dets, key=lambda b: (b["box_xyxy"][2] - b["box_xyxy"][0])
+                                  * (b["box_xyxy"][3] - b["box_xyxy"][1]))
+    cx = (big["box_xyxy"][0] + big["box_xyxy"][2]) / 2
+    return abs(cx - float(exp)) <= tol
+
+
+MODELS = {
+    "paddle": {"endpoint": "/parse",   "key": "pages",  "check": _check_paddle},
+    "yolo":   {"endpoint": "/predict", "key": "images", "check": _check_yolo},
+}
+
+
 def session(pool: int, retries: int) -> requests.Session:
     s = getattr(_local, "s", None)
     if s is None:
@@ -138,6 +172,20 @@ def make_page(idx: int, w=1240, h=1754) -> tuple:
     return buf.getvalue(), tok
 
 
+def make_detection_page(idx: int, total: int, w=640, h=480) -> tuple:
+    """A detection image whose ellipse X centre uniquely identifies it."""
+    radius, y = 80, h // 2
+    lo, hi = radius + 20, w - radius - 20
+    cx = lo + (hi - lo) * idx / max(total - 1, 1)
+    img = Image.new("RGB", (w, h), (245, 245, 245))
+    d = ImageDraw.Draw(img)
+    d.ellipse([cx - radius, y - radius, cx + radius, y + radius],
+              fill=(200, 80, 50), outline=(20, 20, 20), width=4)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    return buf.getvalue(), cx
+
+
 def replica_count(app: str, rg: str):
     """Ground truth from Azure; None if the CLI call fails."""
     try:
@@ -155,7 +203,9 @@ def replica_count(app: str, rg: str):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", required=True)
-    p.add_argument("--endpoint", default="/parse")
+    p.add_argument("--model", default="paddle", choices=sorted(MODELS),
+                   help="which API contract to drive")
+    p.add_argument("--endpoint", default="", help="override the model's default path")
     p.add_argument("--profile", required=True, choices=sorted(PROFILES))
     p.add_argument("--app", default="paddle-demo-cpu", help="ACA app name (replica polling)")
     p.add_argument("--rg", default="rg-aca-model-demo")
@@ -178,7 +228,9 @@ def main():
     if args.seed:
         random.seed(args.seed)
 
-    url = args.host.rstrip("/") + args.endpoint
+    url = args.host.rstrip("/") + (args.endpoint or MODELS[args.model]["endpoint"])
+    spec = MODELS[args.model]
+    result_key, check = spec["key"], spec["check"]
     prof = PROFILES[args.profile]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out_base = args.out or f"soak-{args.profile}-{stamp}"
@@ -193,11 +245,15 @@ def main():
         basis = f"{prof['vcpu']} vCPU + {prof['gib']} GiB @ ${per_replica_s:.6f}/s"
 
     # Pre-render a pool of pages so image generation never skews timing.
-    pages = [make_page(i) for i in range(64)]
+    if args.model == "yolo":
+        pages = [make_detection_page(i, 64) for i in range(64)]
+    else:
+        pages = [make_page(i) for i in range(64)]
 
     print("=" * 74)
     print(f"SOAK TEST  {stamp}")
     print(f"  target    : {url}")
+    print(f"  model     : {args.model}")
     print(f"  profile   : {args.profile} ({prof['label']})")
     print(f"  billing   : {basis}")
     print(f"  duration  : {duration/3600:.2f} h"
@@ -224,22 +280,30 @@ def main():
         expected = [tok for _, tok in picks]
 
         attempts, t0 = 0, time.perf_counter()
-        status, body, err = 0, {}, None
+        status, body, err, detail = 0, {}, None, ""
         try:
             attempts = 1
             r = s.post(url, files=files, timeout=args.timeout)
             status = r.status_code
-            body = r.json() if r.ok else {}
+            if r.ok:
+                body = r.json()
+            else:
+                # Keep a snippet so a 5xx can be attributed to the app
+                # (JSON detail) vs the ACA ingress (HTML/plain text).
+                detail = " ".join(r.text.split())[:160]
         except Exception as exc:
             err = type(exc).__name__
         dt_ms = (time.perf_counter() - t0) * 1000
 
-        # Correctness: each page must return its OWN token.
-        correct = wrong = 0
+        # Correctness: each page must return its OWN result.
+        correct = wrong = nodet = 0
         if status == 200:
-            got = body.get("pages", [])
-            for exp, page in zip(expected, got):
-                if _norm(exp) in _norm(page.get("text", "")):
+            got = body.get(result_key, [])
+            for exp, item in zip(expected, got):
+                verdict = check(exp, item)
+                if verdict is None:
+                    nodet += 1      # model found nothing: accuracy, not contamination
+                elif verdict:
                     correct += 1
                 else:
                     wrong += 1
@@ -267,7 +331,9 @@ def main():
             "attempts": attempts,
             "correct": correct,
             "wrong": wrong,
+            "no_detection": nodet,
             "error": err or "",
+            "detail": detail,
         }
         with lock:
             rows.append(row)
@@ -275,12 +341,15 @@ def main():
             totals["images"] += batch_size
             totals["correct"] += correct
             totals["wrong"] += wrong
+            totals["no_detection"] += nodet
             if status == 200:
                 totals["ok"] += 1
             else:
                 totals["failed"] += 1
                 if err:
                     totals[f"err_{err}"] += 1
+                else:
+                    totals[f"err_HTTP{status}"] += 1
         return row
 
     # Background: poll Azure for the real replica count.
@@ -415,6 +484,7 @@ def main():
     summary = {
         "started_utc": stamp,
         "duration_h": round(wall / 3600, 3),
+        "model": args.model,
         "profile": args.profile,
         "billing_basis": basis,
         "batches_sent": totals["batches"],
@@ -424,6 +494,7 @@ def main():
         "retries_configured": args.retries,
         "correct_pages": totals["correct"],
         "wrong_pages": totals["wrong"],
+        "no_detection_pages": totals["no_detection"],
         "p50_ms_per_image": round(p50, 1),
         "p95_ms_per_image": round(p95, 1),
         "instances_created": len(startup_by_replica),
@@ -441,7 +512,7 @@ def main():
 
     # ---- report -----------------------------------------------------------
     print("\n" + "=" * 74)
-    print(f"SOAK RESULTS  -  {args.profile} ({prof['label']})")
+    print(f"SOAK RESULTS  -  {args.model} / {args.profile} ({prof['label']})")
     print("=" * 74)
     print(f"\nTRAFFIC")
     print(f"  duration            : {wall/3600:.2f} h")
@@ -455,6 +526,8 @@ def main():
     print(f"\nCORRECTNESS")
     print(f"  pages correct       : {totals['correct']:,}")
     print(f"  pages WRONG         : {totals['wrong']:,}  <- cross-contamination")
+    if totals["no_detection"]:
+        print(f"  no detection        : {totals['no_detection']:,}  (model accuracy, not contamination)")
 
     print(f"\nLATENCY (per image)")
     print(f"  p50                 : {p50:,.0f} ms")

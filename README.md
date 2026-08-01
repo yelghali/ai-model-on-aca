@@ -888,6 +888,135 @@ az containerapp update -n yolo-demo -g rg-aca-model-demo --set-env-vars INFERENC
 
 ---
 
+## Multi-hour soak — what only shows up over time
+
+Short benchmarks measure steady-state throughput. They cannot show cold starts, scale-to-zero,
+or what happens when a burst arrives faster than KEDA can add replicas. So each deployment was
+run for **2 hours** against randomised traffic with
+[`loadtest/soak.py`](loadtest/soak.py).
+
+Each run cycles through four phases picked at random — `burst` (batch 4-8, 3 concurrent),
+`steady` (batch 2-4), `low` (batch 1-2, 30-90 s gaps) and `idle` (6-20 min of no traffic at
+all). The idle gaps matter: they let ACA scale to zero so the *next* request pays a real cold
+start. Every run starts from an identical `min-replicas 1` baseline and carries a
+`--budget-usd` hard stop.
+
+```powershell
+cd loadtest
+python soak.py --host https://<yolo-fqdn>       --model yolo   --profile cpu-2  --app yolo-demo       --hours 2 --budget-usd 25 --seed 4242
+python soak.py --host https://<paddle-cpu-fqdn> --model paddle --profile cpu-4  --app paddle-demo-cpu --hours 2 --budget-usd 25 --seed 4242
+python soak.py --host https://<paddle-gpu-fqdn> --model paddle --profile gpu-t4 --app paddle-demo-gpu --hours 2 --budget-usd 25 --seed 4242
+```
+
+### Results — 2 hours each, 6,978 images total
+
+| | **YOLO `yolov8n`** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
+|---|---:|---:|---:|
+| Container | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 (8 vCPU / 56 GiB) |
+| Batches sent | 1,047 | 177 | 274 |
+| **Images sent** | **5,371** | **640** | **967** |
+| Succeeded / failed | 1,047 / **0** | 140 / **37** | 274 / **0** |
+| Pages verified correct | 5,371 | 417 | 967 |
+| **Pages wrong (contamination)** | **0** | **0** | **0** |
+| p50 per image | **104 ms** | 9,734 ms | 906 ms |
+| p95 per image | 200 ms | 20,940 ms | 3,010 ms |
+| Instances created | 10 | 4 | 5 |
+| **Cold start (median)** | **2,122 ms** | 25,642 ms | 31,709 ms |
+| Peak replicas | 6 | 2 | 3 |
+| Replica-seconds | 10,042 | 9,314 | 9,172 |
+| Compute cost | $0.60 | $1.12 | $0.83 |
+| **Cost per 1k images** | **$0.11** | **$1.75** | **$0.85** |
+
+Total spend for all three runs: **$2.55**.
+
+### Finding 1 — cold start varies by 15×, and it decides your scaling strategy
+
+| | Cold start (min / median / max) | Weights in RAM |
+|---|---|---:|
+| YOLO `yolov8n` | 2,062 / **2,122** / 2,242 ms | 430 MB |
+| PP-StructureV3 CPU | 24,496 / **25,642** / 26,074 ms | 2,686 MB |
+| PP-StructureV3 GPU | 29,781 / **31,709** / 33,182 ms | — |
+
+This is the number that decides whether you can run at `min-replicas 0`:
+
+- **YOLO can scale to zero.** A 2.1 s cold start is invisible behind a retry, and the measured
+  first request after a 12.9 min idle gap took only **513 ms** — it had already been re-created.
+- **PP-StructureV3 cannot, if latency matters.** 26-32 s means the first user after an idle
+  period waits half a minute. Four models must be loaded and warmed, and on GPU CUDA context
+  creation is added on top — which is why the *GPU* cold start is the **slowest** of the three
+  even though its inference is by far the fastest.
+
+The GPU also pays this cost at the infrastructure layer: allocating a GPU node and pulling a
+multi-GB CUDA image took **several minutes** before the container even started. Budget for that
+when planning a serverless-GPU rollout.
+
+### Finding 2 — the CPU deployment sheds load under burst; the GPU never does
+
+37 of 177 CPU batches failed. The breakdown is specific:
+
+| Status | Count | |
+|---|---:|---|
+| 503 Service Unavailable | 22 | no healthy replica to route to |
+| 507 Insufficient Storage | 11 | request rejected at the edge |
+| 500 | 4 | |
+| Connection-level errors | **0** | every failure was an HTTP *response* |
+
+**36 of the 37 happened during `burst` phases**, on the largest batches (6-8 images). The
+surviving replica reported `restartCount = 0` and logged only `200 OK` — so these were rejected
+at the ACA edge, never reaching model code. Nothing crashed; the platform refused work it could
+not place.
+
+The mechanism is arithmetic. A CPU batch of 8 pages takes ~2 minutes. With
+`maxReplicas` and a KEDA concurrency trigger, a burst queues far faster than replicas can be
+added — and each new replica needs a further **26 s** to load its models before it can help.
+The GPU, at 906 ms/page, drained each burst before the queue could build, and **failed nothing
+in 274 batches**.
+
+The lesson is not "CPU is bad". It is that **cold start and per-request latency multiply**: slow
+inference plus slow startup means autoscaling cannot rescue you inside a burst. Either keep warm
+replicas (`min-replicas ≥ 1`), cap batch size, or make the request faster.
+
+### Finding 3 — zero cross-contamination across 6,755 verified pages
+
+Every page carries a marker unique to itself, and the assertion is on **identity, not accuracy**:
+
+- **PP-StructureV3** — the page's own OCR token must appear in its own returned text.
+- **YOLO** — the largest returned box must be centred where *that* image's ellipse was drawn.
+  If the model detects nothing at all the page is counted as `no_detection`, never as
+  contamination. Over 5,371 images `no_detection` was **0**.
+
+**0 wrong pages** across all three deployments, including 1,047 concurrent YOLO batches at peak
+6 replicas. The model pool holds under sustained multi-hour concurrency — which is the whole
+point of the [pool design](#tldr--the-code-that-makes-yolo-run-several-inferences-at-once).
+
+### Finding 4 — batching is what makes YOLO cheap
+
+YOLO now accepts a batch on the same endpoint, and the whole batch is handed to **one borrowed
+pooled model** so per-image identity is still guaranteed:
+
+```python
+model = pool.get()                  # borrow: no other thread can touch this instance
+results = model.predict(images, ...)  # ultralytics batches natively
+```
+
+In the smoke test a 3-image batch took 290.6 ms total — **96.9 ms per image**, versus 431 ms for
+single-image calls measured earlier. Batching plus pooling is why YOLO reached 5,371 images in
+the same 2 hours that PP-StructureV3 CPU managed 640.
+
+### Two caveats — read the numbers honestly
+
+1. **The three runs did not see identical traffic, despite the same seed.** Phase length is
+   wall-clock but the *number of batches inside a phase* depends on how fast the server answers.
+   A faster server fits more batches, consumes more random numbers, and the RNG stream diverges
+   after the first phase. So compare **per-image** metrics (latency, cost per 1k, error rate),
+   not raw totals — YOLO did not receive 8× more traffic because it was favoured, but because it
+   could absorb it.
+2. **CPU vs GPU is not a clean single-variable comparison.** The T4 profile carries 8 vCPU and
+   56 GiB; the CPU container had 4 vCPU and 8 GiB. Part of the GPU's resilience under burst is
+   memory headroom, not the accelerator. The per-page *speed* difference is genuinely the GPU.
+
+---
+
 ## Architecture
 
 ```mermaid

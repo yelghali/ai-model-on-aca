@@ -53,7 +53,30 @@ foreach ($a in $apps) {
         continue
     }
     Write-Host "  $($a.name): -> 0" -ForegroundColor Yellow
-    az containerapp update -n $a.name -g $ResourceGroup --min-replicas 0 -o none 2>$null
+    # PowerShell 5.1 turns ANY native-command stderr into a terminating error while
+    # $ErrorActionPreference is 'Stop' - even with 2>$null - which aborted this loop
+    # after the first app. Drop to 'Continue' and judge success by the exit code.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    az containerapp update -n $a.name -g $ResourceGroup --min-replicas 0 -o none 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) {
+        Write-Host "    FAILED (az exit $code)" -ForegroundColor Red
+    }
+}
+
+Write-Host "`nVerifying" -ForegroundColor Cyan
+$after = az containerapp list -g $ResourceGroup -o json 2>$null | ConvertFrom-Json
+$bad = 0
+foreach ($a in $after) {
+    $min = $a.properties.template.scale.minReplicas
+    if ($min -ne 0) { $bad++ }
+    Write-Host ("  {0,-20} min={1}" -f $a.name, $min)
+}
+if ($bad -gt 0) {
+    Write-Host "`n$bad app(s) still have min-replicas > 0." -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "`nDone. Apps remain deployed and will cold start on the next request." -ForegroundColor Green
