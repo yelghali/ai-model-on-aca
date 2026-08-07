@@ -1,9 +1,9 @@
-# Benchmark findings — 2-hour soak, three deployments
+# Benchmark findings — 2-hour soak, four deployments
 
-Measured 2026-08-01 on Azure Container Apps, `swedencentral`, ACA environment
-`aca-model-demo-env`. Every number below comes from
-[`loadtest/soak.py`](loadtest/soak.py) and the raw CSVs in [`loadtest/`](loadtest/);
-nothing is extrapolated.
+Measured 2026-08-01 (YOLO PyTorch, PP-StructureV3 CPU/GPU) and 2026-08-07 (YOLO ONNX) on
+Azure Container Apps, `swedencentral`, ACA environment `aca-model-demo-env`. Every number
+below comes from [`loadtest/soak.py`](loadtest/soak.py) and the raw CSVs in
+[`loadtest/`](loadtest/); nothing is extrapolated.
 
 > **Read [Caveats](#caveats--read-this-before-quoting-any-number) before quoting anything.**
 > The document workload is synthetic and deliberately easy, and one published figure
@@ -13,29 +13,57 @@ nothing is extrapolated.
 
 ## Summary
 
-| | **YOLO `yolov8n`** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
-|---|---:|---:|---:|
-| Compute | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 (8 vCPU / 56 GiB) |
-| Billing rate | $0.000060/s | $0.000120/s | $0.000090/s |
-| Run duration | 2.00 h | 2.00 h | 2.00 h |
-| Batches sent | 1,047 | 177 | 274 |
-| **Images handled** | **5,371** | 640 sent / **417 processed** | **967** |
-| Succeeded / failed | 1,047 / **0** | 140 / **37** (21%) | 274 / **0** |
-| Pages verified correct | 5,371 | 417 | 967 |
-| **Wrong (contamination)** | **0** | **0** | **0** |
-| **Inference per image** (mean) | **104 ms** | **11,170 ms** | **855 ms** |
-| End-to-end per image (mean) | 120 ms | 12,288 ms | 1,564 ms |
-| **Cold start** (median) | **2.1 s** | **25.6 s** | **31.7 s** |
-| Instances created | 10 | 4 | 5 |
-| Peak replicas | 6 | 2 | 3 |
-| Replica-seconds | 10,042 | 9,314 | 9,172 |
-| Utilisation (busy / allocated) | 5.6% | 50.0% | 9.0% |
-| Total cost | $0.60 | $1.12 | $0.83 |
-| **$ / 1k images processed** | **$0.11** | **$2.68** | **$0.85** |
-| $ / 1k at 100% utilisation | $0.006 | $1.34 | $0.077 |
-| RSS at rest | 430 MB | 2,686 MB | — |
+| | **YOLO PyTorch** | **YOLO ONNX** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
+|---|---:|---:|---:|---:|
+| Compute | 2 vCPU / 4 GiB | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 (8 vCPU / 56 GiB) |
+| Billing rate | $0.000060/s | $0.000060/s | $0.000120/s | $0.000090/s |
+| Run duration | 2.00 h | 2.00 h | 2.00 h | 2.00 h |
+| Batches sent | 1,047 | 2,697 | 177 | 274 |
+| **Images handled** | 5,371 | **15,140** | 640 sent / **417 processed** | **967** |
+| Succeeded / failed | 1,047 / **0** | 2,697 / **0** | 140 / **37** (21%) | 274 / **0** |
+| Pages verified correct | 5,371 | 15,140 | 417 | 967 |
+| **Wrong (contamination)** | **0** | **0** | **0** | **0** |
+| **Inference per image** (mean) | **104 ms** | **109 ms** | **11,170 ms** | **855 ms** |
+| Inference p90 | 156 ms | **118 ms** | 15,521 ms | 882 ms |
+| End-to-end per image (mean) | 120 ms | 132 ms | 12,288 ms | 1,564 ms |
+| **Cold start** (median) | 2,122 ms | **181 ms** | 25,642 ms | 31,709 ms |
+| Image size in ACR | 528 MB | **131 MB** | 937 MB | **6.05 GB** |
+| RSS at rest | 430 MB | **131 MB** | 2,686 MB | — |
+| Instances created | 10 | 16 | 4 | 5 |
+| Peak replicas | 6 | 7 | 2 | 3 |
+| Replica-seconds | 10,042 | 17,804 | 9,314 | 9,172 |
+| Utilisation (busy / allocated) | 5.6% | 9.3% | 50.0% | 9.0% |
+| Total cost | $0.60 | $1.07 | $1.12 | $0.83 |
+| **$ / 1k images processed** | $0.11 | **$0.07** | **$2.68** | **$0.85** |
+| $ / 1k at 100% utilisation | $0.006 | $0.007 | $1.34 | $0.077 |
+| **1 replica always on, per month** | **$47 - $158** | **$47 - $158** | **$95 - $315** | **$237** |
 
-Total: **$2.55**, 6,978 images sent, 6,755 verified correct, **0 cross-contamination**.
+Total: **$3.62**, 22,118 images sent, 21,895 verified correct, **0 cross-contamination**.
+
+### Cost of keeping 1 replica warm (to avoid cold start)
+
+730 h/month = 2,628,000 seconds. ACA bills a replica held at `min-replicas` at the
+**idle** rate when it is not processing, and the **active** rate when it is — so the true
+figure sits between these bounds depending on your duty cycle.
+
+| | Idle rate | Always-on **idle** | Always-on **active** | Cold start avoided |
+|---|---:|---:|---:|---:|
+| YOLO PyTorch (2 vCPU / 4 GiB) | $0.000018/s | **$47/mo** | $158/mo | 2.1 s |
+| YOLO ONNX (2 vCPU / 4 GiB) | $0.000018/s | **$47/mo** | $158/mo | 0.18 s |
+| PP-StructureV3 CPU (4 vCPU / 8 GiB) | $0.000036/s | **$95/mo** | $315/mo | 25.6 s |
+| PP-StructureV3 GPU (T4) | **none** | **$237/mo** | $237/mo | 31.7 s |
+
+Two conclusions worth acting on:
+
+**Serverless GPU has no idle tier.** NC T4 v3 bills a flat $0.00009/s whenever allocated,
+so a warm GPU costs **$237/month doing nothing** — and it is the one deployment whose cold
+start (31.7 s process, plus minutes of node allocation and a 6 GB image pull) most tempts
+you to keep it warm. That tension is the central cost decision for GPU on ACA.
+
+**For YOLO ONNX, paying to avoid cold start is pointless.** A 181 ms start is invisible
+behind a retry. Spending $47/month to dodge 0.18 s is not a trade worth making — run it at
+`min-replicas 0`. For PP-StructureV3 CPU the same $95/month buys you 25.6 s, which may well
+be worth it.
 
 ---
 
@@ -67,7 +95,8 @@ harness records the first sighting of every new replica.
 
 | | mean | p50 | p90 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
-| YOLO | **104** | 90 | 156 | 169 | 190 | 204 ms |
+| YOLO PyTorch | **104** | 90 | 156 | 169 | 190 | 204 ms |
+| YOLO ONNX | 109 | 111 | **118** | 121 | 129 | 190 ms |
 | PP-StructureV3 CPU | **11,170** | 9,769 | 15,521 | 16,963 | 17,404 | 17,417 ms |
 | PP-StructureV3 GPU | **855** | 856 | 882 | 889 | 903 | 920 ms |
 
@@ -75,7 +104,8 @@ harness records the first sighting of every new replica.
 
 | | mean | p50 | p90 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
-| YOLO | **120** | 102 | 178 | 195 | 270 | 588 ms |
+| YOLO PyTorch | **120** | 102 | 178 | 195 | 270 | 588 ms |
+| YOLO ONNX | 132 | 131 | 148 | 155 | 205 | 6,218 ms |
 | PP-StructureV3 CPU | **12,288** | 9,816 | 17,394 | 22,214 | 36,081 | 45,673 ms |
 | PP-StructureV3 GPU | **1,564** | 918 | 2,811 | 3,043 | 3,852 | 4,291 ms |
 
@@ -95,20 +125,83 @@ bottleneck — there is little queueing left to explain.
 
 ---
 
+## PyTorch vs ONNX Runtime — not faster, but far lighter
+
+I expected ONNX Runtime to be 2-3× faster per image. **It is not.** Controlling for batch
+size, the two are within noise of each other:
+
+| Batch size | PyTorch ms/image | ONNX ms/image |
+|---:|---:|---:|
+| 1 | 146.2 | **110.5** |
+| 2 | **100.9** | 109.3 |
+| 3 | **88.2** | 109.8 |
+| 4 | **98.4** | 109.8 |
+| 5 | 104.1 | **108.3** |
+| 6 | **101.3** | 109.5 |
+| 7 | 107.7 | **109.0** |
+| 8 | **109.8** | 109.2 |
+| **mean** | **104.2** | 109.2 |
+
+PyTorch is marginally *faster* at batches 3-6. The graph optimisations ONNX Runtime applies
+(operator fusion, constant folding) do not beat what ATen already does for a 3.2 M-parameter
+convnet on 2 vCPU. **The prediction was wrong and the data says so.**
+
+Two genuine differences hide in that table:
+
+**ONNX wins decisively at batch 1** — 110 ms vs 146 ms, 25% faster. That gap is *per-call
+overhead*, not compute: Python dispatching through Ultralytics costs real time on a single
+image and is amortised away by a batch. If your workload is one image per request, ONNX is
+meaningfully faster.
+
+**ONNX is far more predictable.** Its ms/image sits at ~109 regardless of batch size, while
+PyTorch swings between 88 and 146. That shows up as p90: **118 ms vs 156 ms**. A static graph
+with a fixed execution plan has less variance than an interpreter.
+
+Where ONNX wins outright is everything except speed:
+
+| | PyTorch | ONNX | |
+|---|---:|---:|---|
+| Cold start | 2,122 ms | **181 ms** | **11.7× faster** |
+| Image in ACR | 528 MB | **131 MB** | **4.0× smaller** |
+| RSS at rest | 430 MB | **131 MB** | **3.3× less** |
+| Model copies for N threads | **N** (pool) | **1** (shared session) | |
+
+Cold start is the one that changes system behaviour. Most of PyTorch's 2.1 s is simply
+`import torch` — loading shared libraries and registering thousands of operators. The ONNX
+container ships neither torch nor ultralytics and starts in under 200 ms.
+
+That fed through to cost: **$0.07 vs $0.11 per 1k images**. Instances that appear in 181 ms
+make scale-out nearly free, so the ONNX run reached 9.3% utilisation against PyTorch's 5.6%.
+Part of that gap is luck — the ONNX run drew more `burst` phases (caveat 3) — so treat the
+cost difference as directional, not exact.
+
+**The architectural payoff is the shared session.** `InferenceSession.run()` is thread-safe,
+so the `queue.Queue` model pool disappears: one copy of the weights serves every worker
+thread. The pool in `yolo-demo` exists *only* because Ultralytics objects carry mutable
+state. The price of dropping the framework is reimplementing letterboxing and NMS — about
+60 lines of numpy in [`yolo-onnx-demo/app/main.py`](yolo-onnx-demo/app/main.py).
+
+---
+
 ## Cold start — the number that decides your scaling strategy
 
 | | min | median | max | Weights in RAM |
 |---|---:|---:|---:|---:|
-| YOLO `yolov8n` | 2,062 | **2,122** | 2,242 ms | 430 MB |
+| YOLO ONNX | 160 | **181** | 224 ms | 131 MB |
+| YOLO PyTorch | 2,062 | **2,122** | 2,242 ms | 430 MB |
 | PP-StructureV3 CPU | 24,496 | **25,642** | 26,074 ms | 2,686 MB |
 | PP-StructureV3 GPU | 29,781 | **31,709** | 33,182 ms | — |
 
-**YOLO can safely run at `min-replicas 0`.** A 2.1 s cold start hides behind a retry.
-Measured first request after a 12.9 min idle gap: **513 ms** — the replica was already back.
+A **175× spread** between fastest and slowest. This is the number that decides whether you
+can run at `min-replicas 0`.
+
+**Both YOLO variants can.** A 2.1 s cold start hides behind a retry; 181 ms is invisible.
+Measured first request after a 12.9 min idle gap: **513 ms** (PyTorch), **499 ms** (ONNX) —
+the replica was already back.
 
 **PP-StructureV3 cannot, if latency matters.** 26-32 s means the first user after a quiet
 period waits half a minute. Four models must load and warm, and on GPU CUDA context
-creation is added on top — which is why the **GPU cold start is the slowest of the three**
+creation is added on top — which is why the **GPU cold start is the slowest of the four**
 despite having by far the fastest inference.
 
 Measured first request after an idle gap on GPU: 12.2 min → 1,361 ms, 11.7 min → 3,134 ms,
@@ -249,7 +342,7 @@ the request faster.
 
 ---
 
-## Correctness — 0 contamination in 6,755 verified pages
+## Correctness — 0 contamination in 21,895 verified pages
 
 Every image carries a marker unique to itself, and the assertion is on **identity, not
 accuracy**:
@@ -319,6 +412,7 @@ latency table alone suggests.
 ```powershell
 cd loadtest
 python soak.py --host https://<yolo-fqdn>       --model yolo   --profile cpu-2  --app yolo-demo       --hours 2 --budget-usd 25 --seed 4242 --out soak-yolo
+python soak.py --host https://<yolo-onnx-fqdn>  --model yolo   --profile cpu-2  --app yolo-onnx-demo  --hours 2 --budget-usd 25 --seed 4242 --out soak-yolo-onnx
 python soak.py --host https://<paddle-cpu-fqdn> --model paddle --profile cpu-4  --app paddle-demo-cpu --hours 2 --budget-usd 25 --seed 4242 --out soak-cpu
 python soak.py --host https://<paddle-gpu-fqdn> --model paddle --profile gpu-t4 --app paddle-demo-gpu --hours 2 --budget-usd 25 --seed 4242 --out soak-gpu
 ```
@@ -332,4 +426,5 @@ cd deploy
 ```
 
 Raw data for the runs above: [`loadtest/soak-yolo.csv`](loadtest/soak-yolo.csv),
+[`loadtest/soak-yolo-onnx.csv`](loadtest/soak-yolo-onnx.csv),
 [`loadtest/soak-cpu.csv`](loadtest/soak-cpu.csv), [`loadtest/soak-gpu.csv`](loadtest/soak-gpu.csv).

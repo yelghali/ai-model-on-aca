@@ -1,0 +1,10 @@
+# Runtime deps only - no torch, no ultralytics. That is the whole point of this
+# variant: the model is a static ONNX graph, so the training framework that
+# produced it does not need to ship.
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+pillow==11.0.0
+numpy==2.1.3
+psutil==6.1.0
+onnxruntime==1.20.1

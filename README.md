@@ -912,38 +912,44 @@ python soak.py --host https://<paddle-cpu-fqdn> --model paddle --profile cpu-4  
 python soak.py --host https://<paddle-gpu-fqdn> --model paddle --profile gpu-t4 --app paddle-demo-gpu --hours 2 --budget-usd 25 --seed 4242
 ```
 
-### Results — 2 hours each, 6,978 images total
+### Results — 2 hours each, 22,118 images total
 
 > Full analysis, latency percentiles, cost breakdown and caveats:
 > **[BENCHMARK.md](BENCHMARK.md)**
 
-| | **YOLO `yolov8n`** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
-|---|---:|---:|---:|
-| Container | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 (8 vCPU / 56 GiB) |
-| Batches sent | 1,047 | 177 | 274 |
-| **Images sent** | **5,371** | **640** | **967** |
-| Succeeded / failed | 1,047 / **0** | 140 / **37** | 274 / **0** |
-| Pages verified correct | 5,371 | 417 | 967 |
-| **Pages wrong (contamination)** | **0** | **0** | **0** |
-| Mean inference per image | **104 ms** | 11,170 ms | 855 ms |
-| p50 per image (end-to-end) | **102 ms** | 9,816 ms | 918 ms |
-| p90 per image (end-to-end) | 178 ms | 17,394 ms | 2,811 ms |
-| Instances created | 10 | 4 | 5 |
-| **Cold start (median)** | **2,122 ms** | 25,642 ms | 31,709 ms |
-| Peak replicas | 6 | 2 | 3 |
-| Replica-seconds | 10,042 | 9,314 | 9,172 |
-| Compute cost | $0.60 | $1.12 | $0.83 |
-| **Cost per 1k images processed** | **$0.11** | **$2.68** | **$0.85** |
-| Cost per 1k at 100% utilisation | $0.006 | $1.34 | $0.077 |
+| | **YOLO PyTorch** | **YOLO ONNX** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
+|---|---:|---:|---:|---:|
+| Container | 2 vCPU / 4 GiB | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 |
+| Batches sent | 1,047 | 2,697 | 177 | 274 |
+| **Images sent** | 5,371 | **15,140** | **640** | **967** |
+| Succeeded / failed | 1,047 / **0** | 2,697 / **0** | 140 / **37** | 274 / **0** |
+| Pages verified correct | 5,371 | 15,140 | 417 | 967 |
+| **Pages wrong (contamination)** | **0** | **0** | **0** | **0** |
+| Mean inference per image | **104 ms** | 109 ms | 11,170 ms | 855 ms |
+| p90 inference | 156 ms | **118 ms** | 15,521 ms | 882 ms |
+| **Cold start (median)** | 2,122 ms | **181 ms** | 25,642 ms | 31,709 ms |
+| Image size in ACR | 528 MB | **131 MB** | 937 MB | **6.05 GB** |
+| RSS at rest | 430 MB | **131 MB** | 2,686 MB | — |
+| Instances created | 10 | 16 | 4 | 5 |
+| Peak replicas | 6 | 7 | 2 | 3 |
+| Compute cost | $0.60 | $1.07 | $1.12 | $0.83 |
+| **Cost per 1k images processed** | $0.11 | **$0.07** | **$2.68** | **$0.85** |
+| Cost per 1k at 100% utilisation | $0.006 | $0.007 | $1.34 | $0.077 |
+| **1 replica always on, per month** | $47–$158 | $47–$158 | $95–$315 | **$237** |
 
-Total spend for all three runs: **$2.55**.
+Total spend for all four runs: **$3.62**.
+
+> **Keeping a replica warm.** 730 h/month. ACA bills a `min-replicas` replica at the reduced
+> **idle** rate when it is not processing and the **active** rate when it is, hence the range.
+> **Serverless GPU has no idle tier** — a warm T4 costs a flat **$237/month doing nothing**,
+> and it is also the deployment whose 31.7 s cold start most tempts you to keep it warm.
+> For YOLO ONNX the opposite holds: paying $47/month to avoid a **181 ms** start is pointless.
 
 > **Note on the CPU cost.** `soak.py` divides by images *sent*, not images *processed*.
 > PP-StructureV3 CPU lost 223 images to 37 failed batches, so its true cost is
-> **$2.68/1k**, not the $1.75 the script reports. YOLO and GPU had zero failures and are
+> **$2.68/1k**, not the $1.75 the script reports. The other three had zero failures and are
 > unaffected. These are also upper bounds: the harness bills every replica-second at the
-> active rate, while ACA charges a reduced idle rate at min-replicas — except on GPU,
-> which has **no idle discount**.
+> active rate.
 
 > **Note on the workload.** The benchmark page is synthetic: 11 text lines, ~621
 > characters, cleanly rendered, and most of PP-StructureV3 (tables, charts, formulas,
@@ -952,6 +958,12 @@ Total spend for all three runs: **$2.55**.
 > *ratios* hold, since both ran the identical workload; the absolute latencies should not
 > be quoted as "PP-StructureV3 page latency". See
 > [BENCHMARK.md](BENCHMARK.md#caveats--read-this-before-quoting-any-number).
+
+> **ONNX was not faster.** At equal batch size PyTorch and ONNX Runtime are within noise
+> (104 vs 109 ms mean); PyTorch is marginally quicker at batches 3–6. ONNX wins at **batch 1**
+> (110 vs 146 ms — per-call overhead, not compute), is far more **predictable** (p90 118 vs
+> 156 ms), and is dramatically lighter: **11.7× faster cold start, 4× smaller image, 3.3×
+> less RAM, and one shared thread-safe session instead of a pool of N model copies.**
 
 ### Finding 1 — cold start varies by 15×, and it decides your scaling strategy
 

@@ -72,6 +72,10 @@ state: dict = {
 #   in_flight = accepted requests (queued OR executing)
 #   running   = requests actually inside model.predict() right now
 # peak_running is the honest proof of parallelism: it can never exceed the pool size.
+#
+# All four helpers below just move these numbers under a lock. They exist so
+# /stats can answer "are N inferences REALLY running at once, or are N-1 of them
+# sitting in a queue?" - which is the whole question this demo is about.
 _lock = threading.Lock()
 _counters = {
     "in_flight": 0, "peak_in_flight": 0,
@@ -81,6 +85,11 @@ _counters = {
 
 
 def _acquire():
+    """Request ACCEPTED. It may still be waiting for a free worker.
+
+    Called on the event-loop thread the moment we decide to serve the request,
+    so in_flight counts queued + executing.
+    """
     with _lock:
         _counters["in_flight"] += 1
         _counters["total"] += 1
@@ -89,11 +98,18 @@ def _acquire():
 
 
 def _release():
+    """Request finished (successfully or not) and has left the system."""
     with _lock:
         _counters["in_flight"] -= 1
 
 
 def _start_running():
+    """Inference is ACTUALLY starting, on a worker thread with a borrowed model.
+
+    The gap between _acquire and _start_running is queue wait. peak_running is
+    the number to watch: if it never exceeds 1 while INFERENCE_WORKERS is 2,
+    inference is being serialised (e.g. by the GIL) and the pool buys nothing.
+    """
     with _lock:
         _counters["running"] += 1
         if _counters["running"] > _counters["peak_running"]:
@@ -146,6 +162,16 @@ app = FastAPI(
 
 
 def _boxes(r) -> list:
+    """Flatten ONE Ultralytics Result into plain JSON-safe dicts.
+
+    `r.boxes` is a tensor-backed container; each `b` holds:
+        b.cls[0]    class index      -> looked up in r.names ('person', 'car', ...)
+        b.conf[0]   confidence 0..1
+        b.xyxy[0]   [x1, y1, x2, y2] in ORIGINAL image pixels
+
+    Ultralytics has already done letterboxing, NMS and rescaling for us here -
+    that is exactly the work yolo-onnx-demo has to implement by hand.
+    """
     names = r.names
     return [
         {
@@ -158,15 +184,19 @@ def _boxes(r) -> list:
 
 
 def _infer_batch(images: List[Image.Image]) -> dict:
-    """Runs on a worker thread with its own dedicated model instance.
+    """Run one batch. Executes on a worker thread, NOT the event loop.
 
-    The whole batch is handed to ONE borrowed model. Ultralytics batches natively,
-    so N images cost far less than N separate calls, and because the model is
-    borrowed from the pool no other thread can touch its predictor buffers while
-    the batch is in flight.
+    The whole batch is handed to ONE borrowed model. Ultralytics batches
+    natively, so N images cost far less than N separate calls, and because the
+    model is borrowed from the pool no other thread can touch its predictor
+    buffers while the batch is in flight.
+
+    The borrow/return is the crux: a `YOLO` object carries mutable state, so
+    sharing one across threads cross-contaminates results. (yolo-onnx-demo needs
+    no pool at all - an ONNX Runtime session is thread-safe.)
     """
     pool: "queue.Queue[YOLO]" = state["pool"]
-    model = pool.get()  # borrow — guarantees no two threads share a model
+    model = pool.get()  # borrow - blocks until a model is free
     _start_running()
     try:
         t0 = time.perf_counter()
@@ -174,7 +204,7 @@ def _infer_batch(images: List[Image.Image]) -> dict:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     finally:
         _stop_running()
-        pool.put(model)  # always return it, even on failure
+        pool.put(model)  # ALWAYS return it - a leak here would deadlock the pool
 
     # results are returned in the same order as the inputs.
     return {"images": [_boxes(r) for r in results], "inference_ms": elapsed_ms}

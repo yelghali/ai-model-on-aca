@@ -8,7 +8,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('yolo', 'ocr', 'paddle')][string]$Demo,
+    [Parameter(Mandatory)][ValidateSet('yolo', 'yolo-onnx', 'ocr', 'paddle')][string]$Demo,
     [string]$ResourceGroup = 'rg-aca-model-demo',
     [string]$Location = 'westeurope',
     # ACA capacity varies by region. If environment creation fails with
@@ -161,7 +161,22 @@ else {
     az acr build --registry $Registry --image $imageTag --file $dockerfile $context
     $buildExit = $LASTEXITCODE
     $ErrorActionPreference = $prev
-    if ($buildExit -ne 0) { throw "ACR build failed with exit code $buildExit" }
+
+    if ($buildExit -ne 0) {
+        # `az acr build` streams the build log through colorama. On a console using
+        # a legacy code page the CLI dies with UnicodeEncodeError *after* the image
+        # has already been built and pushed - so a non-zero exit here does NOT mean
+        # the build failed. Ask the service what actually happened instead of
+        # trusting the client.
+        Write-Host "==> az exited $buildExit - verifying the run server-side" -ForegroundColor Yellow
+        $runStatus = Try-Az acr task list-runs -r $Registry --top 1 --query "[0].status" -o tsv
+        if ($runStatus -eq 'Succeeded') {
+            Write-Host "==> ACR run reports 'Succeeded' - the CLI only failed while printing logs" -ForegroundColor Yellow
+        }
+        else {
+            throw "ACR build failed (az exit $buildExit, run status '$runStatus')"
+        }
+    }
 }
 
 # --- Container Apps environment -------------------------------------------
@@ -208,11 +223,15 @@ if ($Gpu) {
 $acrUser = Invoke-Az acr credential show -n $Registry --query username -o tsv
 $acrPass = Invoke-Az acr credential show -n $Registry --query "passwords[0].value" -o tsv
 
-# Model-specific env vars. Paddle uses a different threading knob than torch.
+# Model-specific env vars. Each runtime has its own threading knob.
 $envVars = @("INFERENCE_WORKERS=$InferenceWorkers")
 if ($Demo -eq 'paddle') {
     $envVars += "CPU_THREADS_PER_WORKER=$TorchThreadsPerWorker"
     $envVars += if ($Gpu) { 'PADDLE_DEVICE=gpu' } else { 'PADDLE_DEVICE=cpu' }
+}
+elseif ($Demo -eq 'yolo-onnx') {
+    # ONNX Runtime threads INSIDE one run(); workers * intra <= container vCPUs.
+    $envVars += "ORT_INTRA_THREADS=$TorchThreadsPerWorker"
 }
 else {
     $envVars += "TORCH_THREADS_PER_WORKER=$TorchThreadsPerWorker"
@@ -254,7 +273,7 @@ else {
 }
 
 $fqdn = Invoke-Az containerapp show -n $appName -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv
-$path = switch ($Demo) { 'yolo' { '/predict' } 'ocr' { '/ocr' } 'paddle' { '/parse' } }
+$path = switch ($Demo) { 'yolo' { '/predict' } 'yolo-onnx' { '/predict' } 'ocr' { '/ocr' } 'paddle' { '/parse' } }
 $sizeLabel = if ($Gpu) { "$GpuProfileType - $GpuCpu vCPU / $GpuMemory (serverless GPU)" } else { "$Cpu vCPU / $Memory" }
 
 Write-Host ''
