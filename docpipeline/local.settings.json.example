@@ -29,7 +29,9 @@
     "SIM_400_RATE": "0.01",
     "SIM_LATENCY_MS": "250",
 
-    "_comment_notify": "Optional webhook called when a document finishes.",
-    "NOTIFY_URL": ""
+    "_comment_notify": "Callback when a batch (or standalone file) finishes. NOTIFY_SECRET enables HMAC-SHA256 signing in X-Signature-256 so the app can verify the call.",
+    "NOTIFY_URL": "",
+    "NOTIFY_SECRET": "",
+    "NOTIFY_TIMEOUT": "15"
   }
 }

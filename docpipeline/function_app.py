@@ -34,13 +34,14 @@ import hashlib
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import timedelta
 
 import azure.durable_functions as df
 import azure.functions as func
 
-from shared import storage
-from shared import docai
+from shared import docai, notify as notifier, storage
 from shared.http_policy import (
     SCALE_SENSITIVE,
     THROTTLE_SENSITIVE,
@@ -56,7 +57,9 @@ app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 # 1..8) and keeps a call around a second - far below the ACA 240 s request limit.
 YOLO_CHUNK = int(os.getenv("YOLO_CHUNK", "8"))
 PAGE_DPI = int(os.getenv("PAGE_DPI", "150"))
-NOTIFY_URL = os.getenv("NOTIFY_URL", "")
+# Bound the upload: an unbounded multipart body is a trivial memory DoS, and the
+# function holds the only path to storage.
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(40 * 1024 * 1024)))
 
 # Where page text and FIGURES come from:
 #   content-understanding : Azure AI CU for text + PyMuPDF for figures (2 steps,
@@ -66,10 +69,35 @@ NOTIFY_URL = os.getenv("NOTIFY_URL", "")
 #                           guessed from PDF internals
 TEXT_SERVICE = os.getenv("TEXT_SERVICE", "content-understanding").lower()
 
+
+def _instance_id_for(blob_name: str, size: int, metadata: dict | None) -> str:
+    """Resolve the orchestration id for an uploaded blob.
+
+    THE CALLER OWNS THE IDENTIFIER. If the app stamped a `correlationid` on the
+    blob at upload time, that is used verbatim - so the app knows the id BEFORE
+    the upload completes and never has to reverse-engineer a hashing scheme.
+
+    Falling back to a hash of path+size keeps the "just drop a file in the
+    container" case working, and keeps it idempotent: the same bytes at the same
+    path always resolve to the same instance, so a duplicate blob trigger is a
+    no-op rather than a second (billed) run.
+    """
+    corr = (metadata or {}).get("correlationid") or (metadata or {}).get("correlationId")
+    if corr:
+        # Durable instance ids must not contain path or query separators.
+        safe = "".join(c for c in corr if c.isalnum() or c in "-_")[:64]
+        if safe:
+            return safe
+    return "doc-" + hashlib.sha256(f"{blob_name}:{size}".encode()).hexdigest()[:24]
+
 # Durable-level retry. This is the OUTER net: it covers host restarts, activity
 # timeouts and total outages. The INNER, cause-aware retry (429 vs 503 vs 400)
 # lives in shared/http_policy.py, because RetryOptions cannot read Retry-After.
 OUTER_RETRY = df.RetryOptions(first_retry_interval_in_milliseconds=2000, max_number_of_attempts=3)
+
+# Callbacks get more attempts and a longer first interval: the receiving app may
+# simply be restarting, and losing the completion notice is worse than a slow one.
+NOTIFY_RETRY = df.RetryOptions(first_retry_interval_in_milliseconds=5000, max_number_of_attempts=5)
 
 
 # ---------------------------------------------------------------- triggers ---
@@ -78,72 +106,244 @@ OUTER_RETRY = df.RetryOptions(first_retry_interval_in_milliseconds=2000, max_num
 async def on_upload(blob: func.InputStream, client):
     """Start one orchestration per uploaded file.
 
-    The instance id is derived from the blob path + size, so a duplicate trigger
-    (blob triggers can fire more than once) resolves to the SAME instance and is
-    a no-op instead of processing - and paying for - the document twice.
+    The id comes from the blob's `correlationid` metadata when the app supplied
+    one, otherwise from a hash of path+size. Either way the SAME upload always
+    maps to the SAME instance, so a duplicate trigger (blob triggers can fire
+    more than once) is a no-op instead of processing - and billing - the
+    document twice.
     """
     name = blob.name.split("/", 1)[-1]
-    instance_id = "doc-" + hashlib.sha256(f"{blob.name}:{blob.length}".encode()).hexdigest()[:24]
+    metadata = dict(getattr(blob, "metadata", None) or {})
+    instance_id = _instance_id_for(blob.name, blob.length or 0, metadata)
 
     existing = await client.get_status(instance_id)
     if existing and existing.runtime_status and existing.runtime_status.name in (
         "Running", "Pending", "Completed"
     ):
-        logging.info("duplicate trigger for %s -> instance %s already %s",
+        logging.info("duplicate trigger for %s -> %s already %s",
                      name, instance_id, existing.runtime_status.name)
         return
 
-    await client.start_new("document_orchestrator", instance_id,
-                           {"file": name, "run_id": instance_id})
+    await client.start_new("document_orchestrator", instance_id, {
+        "file": name, "run_id": instance_id,
+        "batch_id": metadata.get("batchid") or metadata.get("batchId"),
+    })
     logging.info("started %s for %s", instance_id, name)
+
+
+@app.route(route="upload", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def http_upload(req: func.HttpRequest, client) -> func.HttpResponse:
+    """Public upload gateway: multipart PDFs in, orchestrations started.
+
+    This exists because storage has `publicNetworkAccess: Disabled` - the
+    browser has NO network path to blob, and SAS upload is impossible with
+    `allowSharedKeyAccess: false`. The function is VNet-integrated and holds the
+    only route, so it accepts the bytes and writes them with managed identity.
+
+    That is also the more secure shape: the client never receives a storage
+    credential of any kind.
+    """
+    files = req.files.getlist("file") if hasattr(req, "files") else []
+    if not files:
+        return _json({"error": "no files (multipart field 'file')"}, 400)
+
+    form_batch = None
+    try:
+        form_batch = req.form.get("batchId")
+    except Exception:
+        pass
+    batch_id = form_batch or ("batch-" + uuid.uuid4().hex[:16])
+
+    storage.ensure_containers()
+    items = []
+    for f in files:
+        data = f.read()
+        if not data[:5] == b"%PDF-":
+            return _json({"error": f"{f.filename}: not a PDF"}, 400)
+        if len(data) > MAX_UPLOAD_BYTES:
+            return _json({"error": f"{f.filename}: exceeds {MAX_UPLOAD_BYTES} bytes"}, 413)
+
+        # The CALLER owns the id. Generated here and returned immediately, so
+        # the app can poll without reverse-engineering any hashing scheme.
+        corr = "doc-" + uuid.uuid4().hex[:20]
+        safe_name = os.path.basename(f.filename or "upload.pdf").replace("\\", "_")
+        blob_name = f"{corr}-{safe_name}"
+
+        storage.write_blob(
+            storage.UPLOAD_CONTAINER, blob_name, data, "application/pdf",
+            metadata={"correlationid": corr, "batchid": batch_id},
+        )
+        items.append({"file": blob_name, "display": safe_name, "run_id": corr})
+
+    await client.start_new("batch_orchestrator", batch_id,
+                           {"batch_id": batch_id, "items": items})
+
+    return _json({
+        "batchId": batch_id,
+        "statusUrl": f"api/batch/{batch_id}",
+        "files": [{"file": i["display"], "blob": i["file"],
+                   "instanceId": i["run_id"],
+                   "statusUrl": f"api/status/{i['run_id']}"} for i in items],
+    })
+
+
+@app.route(route="ui", methods=["GET"])
+def http_ui(req: func.HttpRequest) -> func.HttpResponse:
+    """Serve the demo page. Static file, no templating, no secrets."""
+    path = os.path.join(os.path.dirname(__file__), "ui", "index.html")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return func.HttpResponse(fh.read(), mimetype="text/html")
+    except FileNotFoundError:
+        return func.HttpResponse("UI not deployed", status_code=404)
+
+
+def _json(payload: dict, status: int = 200) -> func.HttpResponse:
+    return func.HttpResponse(json.dumps(payload, indent=2, default=str),
+                             status_code=status, mimetype="application/json")
 
 
 @app.route(route="start", methods=["POST"])
 @app.durable_client_input(client_name="client")
 async def http_start(req: func.HttpRequest, client) -> func.HttpResponse:
-    """Manual kick-off: POST {"files": ["a.pdf", "b.pdf"]} (already in uploads/).
+    """Start a BATCH the app already uploaded.
 
-    Returns one instance id per file. Useful for demos and for re-running a
-    batch without re-uploading.
+        POST /api/start
+        { "batchId": "optional-caller-id",
+          "files": ["a.pdf", {"file": "b.pdf", "correlationId": "my-id"}] }
+
+    Returns a batchId plus one instance id per file, so the app never has to
+    guess an identifier. One callback is sent when the WHOLE batch finishes -
+    which is what "user uploaded 5 documents" actually needs, rather than five
+    unrelated webhooks.
     """
-    body = req.get_json()
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse(json.dumps({"error": "invalid json"}),
+                                 status_code=400, mimetype="application/json")
+
     files = body.get("files") or []
     if not files:
-        return func.HttpResponse(json.dumps({"error": "no files"}), status_code=400,
-                                 mimetype="application/json")
+        return func.HttpResponse(json.dumps({"error": "no files"}),
+                                 status_code=400, mimetype="application/json")
 
-    started = []
-    for name in files:
-        instance_id = "doc-" + hashlib.sha256(f"uploads/{name}".encode()).hexdigest()[:24]
-        await client.start_new("document_orchestrator", instance_id,
-                               {"file": name, "run_id": instance_id})
-        started.append({"file": name, "instanceId": instance_id,
-                        "statusUrl": f"/api/status/{instance_id}"})
-    return func.HttpResponse(json.dumps({"started": started}, indent=2),
-                             mimetype="application/json")
+    batch_id = body.get("batchId") or ("batch-" + uuid.uuid4().hex[:16])
+    items = []
+    for entry in files:
+        if isinstance(entry, str):
+            name, corr = entry, None
+        else:
+            name, corr = entry.get("file"), entry.get("correlationId")
+        if not name:
+            continue
+        inst = _instance_id_for(f"uploads/{name}", 0, {"correlationid": corr} if corr else None)
+        items.append({"file": name, "run_id": inst})
+
+    await client.start_new("batch_orchestrator", batch_id,
+                           {"batch_id": batch_id, "items": items})
+
+    return func.HttpResponse(json.dumps({
+        "batchId": batch_id,
+        "statusUrl": f"/api/batch/{batch_id}",
+        "files": [{"file": i["file"], "instanceId": i["run_id"],
+                   "statusUrl": f"/api/status/{i['run_id']}"} for i in items],
+    }, indent=2), mimetype="application/json")
 
 
 @app.route(route="status/{instance_id}", methods=["GET"])
 @app.durable_client_input(client_name="client")
 async def http_status(req: func.HttpRequest, client) -> func.HttpResponse:
     """Progress for one run. Safe to poll while the workflow is still running."""
-    instance_id = req.route_params.get("instance_id")
+    return await _status_response(client, req.route_params.get("instance_id"))
+
+
+@app.route(route="status/by-file/{name}", methods=["GET"])
+@app.durable_client_input(client_name="client")
+async def http_status_by_file(req: func.HttpRequest, client) -> func.HttpResponse:
+    """Escape hatch: resolve a run from the FILE NAME.
+
+    For apps that uploaded without stamping a correlation id and cannot
+    reproduce the deterministic hash (it includes the blob size).
+    """
+    name = req.route_params.get("name")
+    try:
+        props = storage.blob_properties(storage.UPLOAD_CONTAINER, name)
+    except Exception:
+        return func.HttpResponse(json.dumps({"error": f"no such upload: {name}"}),
+                                 status_code=404, mimetype="application/json")
+    instance_id = _instance_id_for(f"uploads/{name}", props["size"], props["metadata"])
+    return await _status_response(client, instance_id)
+
+
+@app.route(route="batch/{batch_id}", methods=["GET"])
+@app.durable_client_input(client_name="client")
+async def http_batch_status(req: func.HttpRequest, client) -> func.HttpResponse:
+    """Progress for a whole upload set: per-file status plus an aggregate."""
+    return await _status_response(client, req.route_params.get("batch_id"))
+
+
+async def _status_response(client, instance_id: str) -> func.HttpResponse:
     status = await client.get_status(instance_id)
     if status is None:
-        return func.HttpResponse(json.dumps({"error": "unknown instance"}),
+        return func.HttpResponse(json.dumps({"error": "unknown instance", "instanceId": instance_id}),
                                  status_code=404, mimetype="application/json")
-
     payload = {
         "instanceId": instance_id,
         "runtimeStatus": status.runtime_status.name if status.runtime_status else None,
         "createdTime": str(status.created_time),
         "lastUpdatedTime": str(status.last_updated_time),
-        # progress published by the orchestrator while it runs
-        "progress": status.custom_status,
+        "progress": status.custom_status,     # published DURING the run
         "output": status.output,
     }
     return func.HttpResponse(json.dumps(payload, indent=2, default=str),
                              mimetype="application/json")
+
+
+# ----------------------------------------------------------- orchestrators ---
+@app.orchestration_trigger(context_name="context")
+def batch_orchestrator(context: df.DurableOrchestrationContext):
+    """Fan out over FILES, then send ONE callback for the whole set.
+
+    Sub-orchestrations rather than activities: each file gets its own history
+    and its own failure boundary, so a 500-page document failing does not roll
+    back the other four.
+    """
+    args = context.get_input()
+    batch_id, items = args["batch_id"], args["items"]
+
+    context.set_custom_status({"phase": "running", "files": len(items), "files_done": 0})
+
+    tasks = [
+        context.call_sub_orchestrator(
+            "document_orchestrator",
+            {"file": i["file"], "run_id": i["run_id"], "batch_id": batch_id},
+            i["run_id"],
+        )
+        for i in items
+    ]
+    results = yield context.task_all(tasks)
+
+    summary = {
+        "batch_id": batch_id,
+        "files": len(results),
+        "ok": sum(1 for r in results if r.get("status") == "ok"),
+        "partial": sum(1 for r in results if r.get("status") == "partial"),
+        "pages": sum(r.get("pages", 0) for r in results),
+        "figures": sum(r.get("figures", 0) for r in results),
+        "results": results,
+        "completed_utc": context.current_utc_datetime.isoformat(),
+    }
+    context.set_custom_status({"phase": "done", "files": len(results),
+                               "files_done": len(results),
+                               "ok": summary["ok"], "partial": summary["partial"]})
+
+    # ONE signed callback for the whole upload set.
+    if notifier.is_configured():
+        yield context.call_activity_with_retry("notify", NOTIFY_RETRY,
+                                               {"event": "batch.completed", **summary})
+    return summary
 
 
 # ----------------------------------------------------------- orchestrator ---
@@ -151,16 +351,23 @@ async def http_status(req: func.HttpRequest, client) -> func.HttpResponse:
 def document_orchestrator(context: df.DurableOrchestrationContext):
     args = context.get_input()
     file_name, run_id = args["file"], args["run_id"]
+    batch_id = args.get("batch_id")
+
+    # current_utc_datetime, NOT datetime.now(): orchestrator code is REPLAYED,
+    # so every wall-clock read must come from the deterministic context or the
+    # timings would change on each replay.
+    started = context.current_utc_datetime
 
     # PHASE 0 - how many pages? (cheap, and needed to size the fan-out)
     meta = yield context.call_activity_with_retry("prepare_document", OUTER_RETRY,
                                                   {"file": file_name, "run_id": run_id})
     pages = meta["pages"]
-    context.set_custom_status({"phase": "pages", "pages": pages, "pages_done": 0})
+    context.set_custom_status({"phase": "pages", "pages": pages, "pages_done": 0,
+                               "batch_id": batch_id})
 
     # PHASE 1 - fan out per PAGE.
-    # Content Understanding and OpenAI are SEPARATE activities on purpose: a 429
-    # from one must not re-run the other (double cost, double latency).
+    # Text extraction and OpenAI are SEPARATE calls on purpose: a 429 from one
+    # must not re-run the other (double cost, double latency).
     page_tasks = [
         context.call_activity_with_retry(
             "process_page", OUTER_RETRY,
@@ -169,6 +376,7 @@ def document_orchestrator(context: df.DurableOrchestrationContext):
         for p in range(pages)
     ]
     page_results = yield context.task_all(page_tasks)
+    t_pages = context.current_utc_datetime
 
     # Collect figures across ALL pages, then chunk. This is what lets YOLO batch:
     # figure count is decoupled from page count.
@@ -176,7 +384,7 @@ def document_orchestrator(context: df.DurableOrchestrationContext):
     chunks = [figures[i:i + YOLO_CHUNK] for i in range(0, len(figures), YOLO_CHUNK)]
     context.set_custom_status({
         "phase": "figures", "pages": pages, "pages_done": len(page_results),
-        "figures": len(figures), "yolo_batches": len(chunks),
+        "figures": len(figures), "yolo_batches": len(chunks), "batch_id": batch_id,
     })
 
     # PHASE 2 - fan out per CHUNK of figures.
@@ -187,22 +395,48 @@ def document_orchestrator(context: df.DurableOrchestrationContext):
         )
         for chunk in chunks
     ]
-    yolo_results = yield context.task_all(yolo_tasks) if yolo_tasks else []
+    # NOTE: this must NOT be written as
+    #     yield context.task_all(tasks) if tasks else []
+    # Python binds that as `yield (task_all(...) if tasks else [])`, so a
+    # document with NO figures would yield a plain list to the Durable runtime,
+    # which expects a Task. Documents with zero figures are common (a paper
+    # whose diagrams are all vector, a text-only report), so this path is hit
+    # in practice.
+    if yolo_tasks:
+        yolo_results = yield context.task_all(yolo_tasks)
+    else:
+        yolo_results = []
+    t_yolo = context.current_utc_datetime
 
     # PHASE 3 - merge into ONE json for this file.
     result = yield context.call_activity_with_retry(
         "merge_results", OUTER_RETRY,
-        {"file": file_name, "run_id": run_id,
+        {"file": file_name, "run_id": run_id, "batch_id": batch_id,
          "pages": page_results, "detections": yolo_results},
     )
+
+    finished = context.current_utc_datetime
+    total_s = max((finished - started).total_seconds(), 0.001)
+    result["batch_id"] = batch_id
+    result["timings"] = {
+        "pages_s": round((t_pages - started).total_seconds(), 2),
+        "yolo_s": round((t_yolo - t_pages).total_seconds(), 2),
+        "total_s": round(total_s, 2),
+        "pages_per_s": round(pages / total_s, 2),
+    }
 
     context.set_custom_status({
         "phase": "done", "pages": pages, "pages_done": len(page_results),
         "figures": len(figures), "status": result["status"],
+        "batch_id": batch_id, "timings": result["timings"],
     })
 
-    if NOTIFY_URL:
-        yield context.call_activity_with_retry("notify", OUTER_RETRY, result)
+    # Notify per file ONLY when this document is standalone. Inside a batch the
+    # parent sends a single callback for the whole upload set - five files must
+    # not produce five unrelated webhooks.
+    if notifier.is_configured() and not batch_id:
+        yield context.call_activity_with_retry(
+            "notify", NOTIFY_RETRY, {"event": "document.completed", **result})
 
     return result
 
@@ -337,6 +571,7 @@ def merge_results(payload: dict) -> dict:
     doc = {
         "file": file_name,
         "run_id": run_id,
+        "batch_id": payload.get("batch_id"),
         "pages": len(pages_out),
         "figures": sum(len(p["figures"]) for p in pages_out),
         "status": "ok" if failed == 0 else "partial",
@@ -358,12 +593,16 @@ def merge_results(payload: dict) -> dict:
 
 @app.activity_trigger(input_name="payload")
 def notify(payload: dict) -> dict:
-    """Tell the calling app the run is done. Best-effort, never fails the run."""
-    import requests
+    """Deliver the completion callback.
 
+    Deliberately does NOT swallow transport failures: shared/notify.py raises on
+    5xx and connection errors so Durable's retry actually fires. The earlier
+    version caught everything and returned, which silently disabled the retry.
+    A 4xx raises PermanentError, which we convert to a result - the app rejected
+    the payload and will keep rejecting it.
+    """
     try:
-        resp = requests.post(NOTIFY_URL, json=payload, timeout=15)
-        return {"notified": True, "status_code": resp.status_code}
-    except Exception as exc:
-        logging.warning("notify failed: %s", exc)
-        return {"notified": False, "error": str(exc)}
+        return notifier.post(payload)
+    except PermanentError as exc:
+        logging.error("notify rejected permanently: %s", exc)
+        return {"notified": False, "permanent": True, "error": str(exc)}

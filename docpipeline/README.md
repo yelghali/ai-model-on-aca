@@ -145,8 +145,10 @@ func start
 | Endpoint | Purpose |
 |---|---|
 | drop a PDF in `uploads/` | starts a run automatically |
-| `POST /api/start` `{"files":["a.pdf"]}` | start manually |
-| `GET /api/status/{instanceId}` | progress: phase, pages done, figures, result blob |
+| `POST /api/start` `{"files":["a.pdf"]}` | start a batch, returns ids |
+| `GET /api/status/{instanceId}` | progress for one file |
+| `GET /api/batch/{batchId}` | progress for a whole upload set |
+| `GET /api/status/by-file/{name}` | resolve a run from the file name |
 
 `set_custom_status` publishes progress *while the run is going*, so a UI can show
 "page 143 of 300" rather than just Running/Completed.
@@ -158,6 +160,20 @@ To exercise the real ACA scale-out retry path, point at the live app:
 ```
 
 With `YOLO_URL` empty, YOLO is simulated and the whole pipeline runs for free.
+
+## Deploy it to Azure
+
+[infra/](infra/README.md) has Terraform for the storage account, the Flex
+Consumption function app and a **private** YOLO API on Container Apps. Storage is
+private-endpoint-only with shared keys disabled, so everything authenticates with
+managed identity — the browser talks to `/api/upload`, and the function is the
+only thing with a network path to either blob or the model.
+
+```powershell
+cd infra
+Copy-Item terraform.tfvars.example terraform.tfvars   # then edit
+terraform init ; terraform apply
+```
 
 ## Output
 

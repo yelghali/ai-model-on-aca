@@ -1,0 +1,18 @@
+# Terraform
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored - committing it pins
+# provider versions so everyone plans against the same schema.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+terraform.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+validate.txt

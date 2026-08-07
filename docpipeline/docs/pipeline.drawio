@@ -1,0 +1,224 @@
+<mxfile host="app.diagrams.net" agent="docpipeline" version="24.0.0">
+  <diagram name="Document pipeline" id="docpipeline-1">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1"
+                  arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="1600"
+                  math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ============================ CLIENT ============================ -->
+        <mxCell id="lane-app" value="Client application"
+                style="swimlane;horizontal=0;html=1;startSize=28;fillColor=#f5f5f5;strokeColor=#999999;fontStyle=1;fontSize=13;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="1020" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="app" value="App&#10;(user uploads N documents)"
+                style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;"
+                vertex="1" parent="lane-app">
+          <mxGeometry x="60" y="60" width="180" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="upload" value="PUT blob → uploads/&#10;&#10;metadata:&#10;  correlationid = &lt;app guid&gt;&#10;  batchid       = &lt;app guid&gt;"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;"
+                vertex="1" parent="lane-app">
+          <mxGeometry x="300" y="45" width="230" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="poll" value="GET /api/status/{id}&#10;GET /api/batch/{batchId}&#10;GET /api/status/by-file/{name}&#10;&#10;live progress while running"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=11;"
+                vertex="1" parent="lane-app">
+          <mxGeometry x="580" y="45" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hook" value="POST callback&#10;X-Signature-256 (HMAC)&#10;event: batch.completed"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=11;"
+                vertex="1" parent="lane-app">
+          <mxGeometry x="840" y="45" width="160" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-app-upload" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6c8ebf;"
+                edge="1" parent="lane-app" source="app" target="upload">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ========================= ORCHESTRATION ========================= -->
+        <mxCell id="lane-orch" value="Durable Functions"
+                style="swimlane;horizontal=0;html=1;startSize=28;fillColor=#f5f5f5;strokeColor=#999999;fontStyle=1;fontSize=13;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="1020" height="820" as="geometry" />
+        </mxCell>
+
+        <mxCell id="trigger" value="Blob trigger  /  POST /api/start&#10;&#10;instance id = correlationid (caller-owned)&#10;fallback = sha256(path+size)&#10;→ duplicate trigger is a no-op"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="60" y="45" width="300" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="batchorch" value="BATCH ORCHESTRATOR&#10;fan out over FILES → sub-orchestrations&#10;one callback for the whole upload set"
+                style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=11;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="60" y="170" width="300" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="docorch" value="DOCUMENT ORCHESTRATOR  (one per file)&#10;own history · own failure boundary"
+                style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=11;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="60" y="275" width="300" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- phase 1 -->
+        <mxCell id="p1" value="PHASE 1 — fan out per PAGE   (wide: 1 task per page)"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=12;verticalAlign=top;spacingTop=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="420" y="60" width="560" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1a" value="Text extraction&#10;Content Understanding&#10;— or —&#10;Mistral Document AI&#10;(markdown + figure bboxes&#10;in ONE call)"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="440" y="95" width="170" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1b" value="Azure OpenAI&#10;page summary&#10;&#10;SEPARATE call:&#10;a 429 here must not&#10;re-run extraction"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="630" y="95" width="160" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1c" value="Figures&#10;raster + vector&#10;clusters&#10;&#10;(page, figure)&#10;travels with each"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="810" y="95" width="150" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1note" value="pages ≠ figures — bert.pdf: 16 pages → 39 figures · resnet.pdf: 12 pages → 7"
+                style="text;html=1;fontSize=10;fontStyle=2;fontColor=#7f6000;align=left;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="440" y="220" width="520" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- collect -->
+        <mxCell id="collect" value="collect figures across ALL pages  →  chunk by 8&#10;(this is what makes YOLO batching possible)"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="420" y="315" width="560" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- phase 2 -->
+        <mxCell id="p2" value="PHASE 2 — fan out per CHUNK of figures  (narrow: ~8 figures per call)"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=12;verticalAlign=top;spacingTop=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="420" y="395" width="560" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2a" value="YOLO batch → ACA API  (KEDA HTTP autoscale, scale-to-zero)&#10;503 / 507 during scale-out → SHORT jittered backoff"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="440" y="430" width="520" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- phase 3 -->
+        <mxCell id="p3" value="PHASE 3 — merge&#10;correlate by (page, figure) EXPLICITLY, never by position&#10;→ ONE results/&lt;file&gt;.json   ·   status: ok | partial"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="420" y="545" width="560" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- retry policy -->
+        <mxCell id="retry" value="RETRY POLICY  (shared/http_policy.py)&#10;&#10;429  → honour Retry-After (capped) + jitter&#10;503 / 507 → short jittered backoff (ACA is adding a replica)&#10;4xx  → NEVER retried; page marked failed, doc = partial&#10;&#10;full jitter everywhere — a fan-out that fails together&#10;must not retry in lockstep"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;verticalAlign=top;spacingTop=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="60" y="395" width="300" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="guard" value="GUARD RAILS&#10;&#10;maxConcurrentActivityFunctions = 8&#10;→ fan-out cannot stampede a cold YOLO&#10;&#10;blob REFERENCES in history, never bytes&#10;→ Durable replays every input/output"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;verticalAlign=top;spacingTop=6;"
+                vertex="1" parent="lane-orch">
+          <mxGeometry x="60" y="565" width="300" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- edges inside orchestration -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#9673a6;"
+                edge="1" parent="lane-orch" source="trigger" target="batchorch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#9673a6;"
+                edge="1" parent="lane-orch" source="batchorch" target="docorch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="fan out" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#d6b656;fontSize=10;"
+                edge="1" parent="lane-orch" source="docorch" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="fan in" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#b85450;fontSize=10;"
+                edge="1" parent="lane-orch" source="p1" target="collect">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="fan out" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#d6b656;fontSize=10;"
+                edge="1" parent="lane-orch" source="collect" target="p2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="fan in" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#82b366;fontSize=10;"
+                edge="1" parent="lane-orch" source="p2" target="p3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================ STORAGE =========================== -->
+        <mxCell id="lane-store" value="Blob storage"
+                style="swimlane;horizontal=0;html=1;startSize=28;fillColor=#f5f5f5;strokeColor=#999999;fontStyle=1;fontSize=13;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="1100" width="1020" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s1" value="uploads/&#10;&lt;file&gt;.pdf"
+                style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;"
+                vertex="1" parent="lane-store">
+          <mxGeometry x="80" y="35" width="140" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="work/&lt;run&gt;/pages/&#10;page-0001.png"
+                style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;"
+                vertex="1" parent="lane-store">
+          <mxGeometry x="320" y="35" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="work/&lt;run&gt;/figures/&#10;p0007-f00.png"
+                style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;"
+                vertex="1" parent="lane-store">
+          <mxGeometry x="560" y="35" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="results/&#10;&lt;file&gt;.json"
+                style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;"
+                vertex="1" parent="lane-store">
+          <mxGeometry x="800" y="35" width="140" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- cross-lane edges -->
+        <mxCell id="x1" value="blob created" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#d79b00;fontSize=10;"
+                edge="1" parent="1" source="upload" target="trigger">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x2" value="signed callback" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#82b366;fontSize=10;"
+                edge="1" parent="1" source="p3" target="hook">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x3" value="poll" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#82b366;fontSize=10;"
+                edge="1" parent="1" source="poll" target="docorch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x4" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#999999;"
+                edge="1" parent="1" source="p3" target="s4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================ MEASURED ========================== -->
+        <mxCell id="perf" value="MEASURED — 18 documents, 3 spike/quiet waves (scripts/batch_test.py)&#10;&#10;242 pages · 272 figures · 4.26 pages/s · 19.0 docs/min&#10;ms/page  mean 564 · median 406 · min 262 · max 1627&#10;&#10;wave 1 (cold)  3.0 pages/s        ← first spike pays warm-up&#10;wave 2 (warm)  6.3 pages/s&#10;wave 3 (warm)  6.6 pages/s&#10;&#10;correctness: 18/18 page sequences intact · 272/272 figures correlated&#10;with 429 / 503 / 400 injected throughout"
+                style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=10;fontSize=11;verticalAlign=top;spacingTop=8;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="1260" width="1020" height="190" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Document pipeline — demo</title>
+<style>
+  :root {
+    --bg:#0f1117; --panel:#171a23; --line:#272b38; --fg:#e6e8ee; --muted:#98a0b3;
+    --accent:#6ea8fe; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:20px 28px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; font-weight:600; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  main { padding:24px 28px; max-width:1100px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:18px; margin-bottom:18px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  button { background:var(--accent); color:#0b1020; border:0; border-radius:7px;
+           padding:9px 16px; font-weight:600; cursor:pointer; font-size:13px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.secondary { background:#2a3040; color:var(--fg); }
+  input[type=file] { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; margin-top:10px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+          font-size:13px; vertical-align:middle; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase;
+       letter-spacing:.04em; }
+  .bar { height:7px; background:#2a3040; border-radius:4px; overflow:hidden; min-width:130px; }
+  .bar > i { display:block; height:100%; background:var(--accent); width:0; transition:width .35s; }
+  .pill { padding:2px 9px; border-radius:99px; font-size:11px; font-weight:600; }
+  .Running,.Pending { background:#1f2a44; color:var(--accent); }
+  .Completed,.ok    { background:#16301c; color:var(--ok); }
+  .partial          { background:#332a12; color:var(--warn); }
+  .Failed,.bad      { background:#3a1a1c; color:var(--bad); }
+  code { background:#0b0d13; padding:1px 6px; border-radius:4px; font-size:12px;
+         color:var(--muted); }
+  .muted { color:var(--muted); }
+  .stat { display:inline-block; margin-right:22px; }
+  .stat b { font-size:20px; display:block; font-weight:600; }
+  .stat span { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Document pipeline</h1>
+  <p>Upload PDFs &rarr; per-page extraction &rarr; batched YOLO on figures &rarr; one JSON per file.
+     The browser never touches storage: uploads go through this API, which holds the only network path.</p>
+</header>
+
+<main>
+  <div class="panel">
+    <div class="row">
+      <input id="files" type="file" accept="application/pdf" multiple />
+      <button id="go">Upload &amp; process</button>
+      <button id="demo" class="secondary">Simulate 4 users</button>
+      <span id="msg" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="summary" style="display:none">
+    <div class="stat"><b id="s-files">0</b><span>files</span></div>
+    <div class="stat"><b id="s-pages">0</b><span>pages</span></div>
+    <div class="stat"><b id="s-figs">0</b><span>figures</span></div>
+    <div class="stat"><b id="s-done">0</b><span>completed</span></div>
+    <div class="stat"><b id="s-elapsed">0s</b><span>elapsed</span></div>
+  </div>
+
+  <div class="panel">
+    <table>
+      <thead><tr>
+        <th style="width:26%">File</th><th style="width:12%">Batch</th>
+        <th style="width:12%">Status</th><th style="width:12%">Phase</th>
+        <th style="width:22%">Progress</th><th style="width:16%">Result</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="muted">No runs yet.</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const tracked = new Map();          // instanceId -> row state
+let t0 = null, timer = null;
+
+const $ = id => document.getElementById(id);
+
+async function upload(fileList, batchId) {
+  const fd = new FormData();
+  for (const f of fileList) fd.append("file", f, f.name);
+  if (batchId) fd.append("batchId", batchId);
+  const r = await fetch("api/upload", { method: "POST", body: fd });
+  if (!r.ok) throw new Error("upload failed: " + r.status + " " + await r.text());
+  return r.json();
+}
+
+function track(started) {
+  for (const it of started.files) {
+    tracked.set(it.instanceId, {
+      file: it.file, batch: started.batchId, status: "Pending",
+      phase: "-", pct: 0, result: null
+    });
+  }
+  render();
+  if (!timer) { t0 = Date.now(); timer = setInterval(poll, 1200); }
+}
+
+async function poll() {
+  for (const [id, st] of tracked) {
+    if (st.status === "Completed" || st.status === "Failed") continue;
+    try {
+      const r = await fetch("api/status/" + id);
+      if (!r.ok) continue;
+      const s = await r.json();
+      st.status = s.runtimeStatus || st.status;
+      const p = s.progress || {};
+      st.phase = p.phase || "-";
+      // Progress: pages fan-out is the long pole, so weight it heavily.
+      if (p.phase === "done") st.pct = 100;
+      else if (p.pages) st.pct = Math.min(95, Math.round((p.pages_done || 0) / p.pages * 90));
+      if (s.output) { st.result = s.output; st.pct = 100; }
+    } catch (e) { /* transient - keep polling */ }
+  }
+  render();
+  const live = [...tracked.values()].some(s => s.status !== "Completed" && s.status !== "Failed");
+  if (!live && timer) { clearInterval(timer); timer = null; }
+}
+
+function render() {
+  const rows = $("rows");
+  if (!tracked.size) { rows.innerHTML = '<tr><td colspan="6" class="muted">No runs yet.</td></tr>'; return; }
+  rows.innerHTML = "";
+  let pages = 0, figs = 0, done = 0;
+  for (const [id, st] of tracked) {
+    const res = st.result || {};
+    pages += res.pages || 0; figs += res.figures || 0;
+    if (st.status === "Completed") done++;
+    const statusCls = res.status === "partial" ? "partial" : st.status;
+    const label = res.status === "partial" ? "partial" : st.status;
+    rows.insertAdjacentHTML("beforeend", `
+      <tr>
+        <td>${st.file}</td>
+        <td><code>${(st.batch || "").slice(0, 12)}</code></td>
+        <td><span class="pill ${statusCls}">${label}</span></td>
+        <td class="muted">${st.phase}</td>
+        <td><div class="bar"><i style="width:${st.pct}%"></i></div></td>
+        <td class="muted">${res.pages ? res.pages + "p / " + res.figures + "fig" : "-"}</td>
+      </tr>`);
+  }
+  $("summary").style.display = "block";
+  $("s-files").textContent = tracked.size;
+  $("s-pages").textContent = pages;
+  $("s-figs").textContent = figs;
+  $("s-done").textContent = done;
+  $("s-elapsed").textContent = t0 ? Math.round((Date.now() - t0) / 1000) + "s" : "0s";
+}
+
+$("go").onclick = async () => {
+  const files = $("files").files;
+  if (!files.length) { $("msg").textContent = "pick at least one PDF"; return; }
+  $("go").disabled = true; $("msg").textContent = "uploading...";
+  try {
+    track(await upload(files, null));
+    $("msg").textContent = "processing";
+  } catch (e) { $("msg").textContent = e.message; }
+  $("go").disabled = false;
+};
+
+// Simulate several users uploading at the same moment - the spike case.
+$("demo").onclick = async () => {
+  const files = $("files").files;
+  if (!files.length) { $("msg").textContent = "pick PDFs first, then simulate"; return; }
+  $("demo").disabled = true; $("msg").textContent = "4 users uploading at once...";
+  try {
+    const waves = [0, 1, 2, 3].map(i =>
+      upload([files[i % files.length]], "user" + i + "-" + Date.now().toString(36)));
+    for (const s of await Promise.all(waves)) track(s);
+    $("msg").textContent = "processing 4 concurrent uploads";
+  } catch (e) { $("msg").textContent = e.message; }
+  $("demo").disabled = false;
+};
+</script>
+</body>
+</html>

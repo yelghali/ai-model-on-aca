@@ -1,0 +1,32 @@
+# Copy to terraform.tfvars and adjust.
+
+resource_group_name = "rg-docpipeline"
+location            = "swedencentral" # must support Flex Consumption AND Container Apps
+name_prefix         = "docpipe"
+
+# --- YOLO image (must already exist in your registry) -----------------------
+container_registry_server = "acamodeldemo68afefdb.azurecr.io"
+acr_resource_group        = "rg-aca-model-demo"
+yolo_image                = "acamodeldemo68afefdb.azurecr.io/yolo-demo:v1"
+
+# 0 = scale to zero (cheapest). Cold start ~2.1s PyTorch / ~0.2s ONNX.
+yolo_min_replicas      = 0
+yolo_max_replicas      = 10
+yolo_cpu               = 2.0
+yolo_memory            = "4Gi"
+yolo_inference_workers = "2" # workers x threads must be <= yolo_cpu
+
+# --- pipeline ---------------------------------------------------------------
+text_service = "content-understanding" # or "mistral-docai"
+yolo_chunk   = "8"                     # figures per YOLO call
+
+# Scale ceiling. Careful: this MULTIPLIES with maxConcurrentActivityFunctions
+# in host.json (8), so 40 x 8 = 320 concurrent calls into Azure OpenAI.
+function_max_instances      = 40
+function_instance_memory_mb = 2048
+
+# --- optional ---------------------------------------------------------------
+# notify_url    = "https://your-app.example.com/hooks/docpipeline"
+# notify_secret = "..."   # enables HMAC-SHA256 signing of callbacks
+# mistral_api_key = "..." # empty = Document AI is simulated
+sim_429_rate = "0.15"
