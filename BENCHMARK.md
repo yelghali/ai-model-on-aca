@@ -181,6 +181,35 @@ thread. The pool in `yolo-demo` exists *only* because Ultralytics objects carry 
 state. The price of dropping the framework is reimplementing letterboxing and NMS — about
 60 lines of numpy in [`yolo-onnx-demo/app/main.py`](yolo-onnx-demo/app/main.py).
 
+### Which runtime should you actually pick?
+
+**Throughput is not a reason to choose either.** Per image at equal batch size they are the
+same (104 vs 109 ms). The soak's 15,140 vs 5,371 images reflects 77% more replica-seconds and
+burstier traffic, not faster compute — ONNX buys *elasticity*, not throughput.
+
+| | PyTorch | ONNX |
+|---|---|---|
+| Swap weights | **env var, no rebuild** | needs an ACR rebuild (export is at build time) |
+| Model families | v5/v8/v11, detect **+ segment + pose** | **v8/v11 detection only** (`_decode` assumes `4 + nc`, no objectness) |
+| Weights in RAM | **N copies** (one per worker) | **1** (shared thread-safe session) |
+| Dependency surface | torch + torchvision + ultralytics | onnxruntime + numpy + pillow |
+| Cold start / image / RSS | 2.1 s / 528 MB / 430 MB | **0.18 s / 131 MB / 131 MB** |
+
+**Default to PyTorch.** For `yolov8n`-class models and moderate replica counts it is easier,
+supports every YOLO task, and a 2.1 s cold start hides behind a retry.
+
+**Switch to ONNX when** one of these is true:
+- model larger than `yolov8s` — the pool holds N copies, the session holds one
+- `max-replicas` in the tens — a 4× smaller image is 4× less pull time on every cold node
+- a container-security gate — the torch chain carries most of this repo's CVE surface
+- one image per request — ONNX is 25% faster at batch 1 (110 vs 146 ms)
+
+**Check the licence before either.** Ultralytics YOLOv8 is **AGPL-3.0**, which can impose
+source-disclosure obligations on a commercial network service; Ultralytics sells an Enterprise
+licence for this. Exporting to ONNX does not obviously escape it — the weights and the
+exporter are still Ultralytics-derived. Not legal advice: put it in front of legal early,
+because it can invalidate the approach regardless of runtime.
+
 ---
 
 ## Cold start — the number that decides your scaling strategy

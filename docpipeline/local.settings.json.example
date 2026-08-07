@@ -1,0 +1,35 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+
+    "UPLOAD_CONTAINER": "uploads",
+    "WORK_CONTAINER": "work",
+    "RESULT_CONTAINER": "results",
+
+    "PAGE_DPI": "150",
+    "YOLO_CHUNK": "8",
+
+    "_comment_text": "content-understanding (Azure AI CU + PyMuPDF figures) or mistral-docai (text AND figure bboxes in one call).",
+    "TEXT_SERVICE": "content-understanding",
+    "_comment_mistral": "Set MISTRAL_API_KEY to call the real Document AI. Unset -> simulated. MISTRAL_ENDPOINT overrides for Azure AI Foundry.",
+    "MISTRAL_API_KEY": "",
+    "MISTRAL_ENDPOINT": "https://api.mistral.ai/v1/ocr",
+    "MISTRAL_MODEL": "mistral-ocr-latest",
+
+    "_comment_yolo": "Leave YOLO_URL empty to simulate. Set it to the ACA app to exercise the real 503-during-scale-out retry path.",
+    "YOLO_URL": "",
+    "YOLO_TIMEOUT": "120",
+
+    "_comment_sim": "Injected failure rates so the retry policy is actually tested. Raise SIM_429_RATE for a demo.",
+    "SIM_429_RATE": "0.15",
+    "SIM_503_RATE": "0.05",
+    "SIM_400_RATE": "0.01",
+    "SIM_LATENCY_MS": "250",
+
+    "_comment_notify": "Optional webhook called when a document finishes.",
+    "NOTIFY_URL": ""
+  }
+}

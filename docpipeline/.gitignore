@@ -1,0 +1,7 @@
+# local settings + samples/outputs are environment-specific
+local.settings.json
+samples/
+out/
+__pycache__/
+*.pyc
+.python_packages/
