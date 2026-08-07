@@ -24,6 +24,10 @@ Both apps expose the same operational surface so the demo story is identical:
 > walkthrough of the same material, built to be projected. Arrow keys navigate, `O` for slide
 > overview, `T` toggles light/dark, `F` fullscreen. Self-contained, no build step, no network.
 
+> 📈 **Measured results?** See **[BENCHMARK.md](BENCHMARK.md)** — three deployments, 2-hour
+> randomised soak each, 6,978 images: latency percentiles, cold start, cost per 1k, and the
+> caveats that matter before quoting any of it.
+
 ---
 
 ## TL;DR — the code that makes YOLO run several inferences at once
@@ -910,6 +914,9 @@ python soak.py --host https://<paddle-gpu-fqdn> --model paddle --profile gpu-t4 
 
 ### Results — 2 hours each, 6,978 images total
 
+> Full analysis, latency percentiles, cost breakdown and caveats:
+> **[BENCHMARK.md](BENCHMARK.md)**
+
 | | **YOLO `yolov8n`** | **PP-StructureV3 CPU** | **PP-StructureV3 GPU** |
 |---|---:|---:|---:|
 | Container | 2 vCPU / 4 GiB | 4 vCPU / 8 GiB | NC8as-T4 (8 vCPU / 56 GiB) |
@@ -918,16 +925,33 @@ python soak.py --host https://<paddle-gpu-fqdn> --model paddle --profile gpu-t4 
 | Succeeded / failed | 1,047 / **0** | 140 / **37** | 274 / **0** |
 | Pages verified correct | 5,371 | 417 | 967 |
 | **Pages wrong (contamination)** | **0** | **0** | **0** |
-| p50 per image | **104 ms** | 9,734 ms | 906 ms |
-| p95 per image | 200 ms | 20,940 ms | 3,010 ms |
+| Mean inference per image | **104 ms** | 11,170 ms | 855 ms |
+| p50 per image (end-to-end) | **102 ms** | 9,816 ms | 918 ms |
+| p90 per image (end-to-end) | 178 ms | 17,394 ms | 2,811 ms |
 | Instances created | 10 | 4 | 5 |
 | **Cold start (median)** | **2,122 ms** | 25,642 ms | 31,709 ms |
 | Peak replicas | 6 | 2 | 3 |
 | Replica-seconds | 10,042 | 9,314 | 9,172 |
 | Compute cost | $0.60 | $1.12 | $0.83 |
-| **Cost per 1k images** | **$0.11** | **$1.75** | **$0.85** |
+| **Cost per 1k images processed** | **$0.11** | **$2.68** | **$0.85** |
+| Cost per 1k at 100% utilisation | $0.006 | $1.34 | $0.077 |
 
 Total spend for all three runs: **$2.55**.
+
+> **Note on the CPU cost.** `soak.py` divides by images *sent*, not images *processed*.
+> PP-StructureV3 CPU lost 223 images to 37 failed batches, so its true cost is
+> **$2.68/1k**, not the $1.75 the script reports. YOLO and GPU had zero failures and are
+> unaffected. These are also upper bounds: the harness bills every replica-second at the
+> active rate, while ACA charges a reduced idle rate at min-replicas — except on GPU,
+> which has **no idle discount**.
+
+> **Note on the workload.** The benchmark page is synthetic: 11 text lines, ~621
+> characters, cleanly rendered, and most of PP-StructureV3 (tables, charts, formulas,
+> orientation, unwarping) is disabled. **855 ms/page is a floor, not a typical figure** —
+> a dense real scan through the full pipeline is several times more work. The CPU-vs-GPU
+> *ratios* hold, since both ran the identical workload; the absolute latencies should not
+> be quoted as "PP-StructureV3 page latency". See
+> [BENCHMARK.md](BENCHMARK.md#caveats--read-this-before-quoting-any-number).
 
 ### Finding 1 — cold start varies by 15×, and it decides your scaling strategy
 
