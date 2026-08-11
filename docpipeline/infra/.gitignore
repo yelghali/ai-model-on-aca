@@ -16,3 +16,6 @@ override.tf.json
 terraform.rc
 tfplan
 validate.txt
+# Transient CLI logs - they embed subscription and resource ids.
+plan.txt
+apply*.txt

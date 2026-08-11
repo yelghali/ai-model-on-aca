@@ -8,6 +8,40 @@ The demo UI and its upload API are *not* here on purpose — they are applicatio
 code inside the same function app (`GET /api/ui`, `POST /api/upload`), so they
 ship with the deployment package rather than with the infrastructure.
 
+## Where to host what: Flex Consumption *and* Container Apps
+
+Both, for different jobs. They are not competing options here.
+
+**The orchestration runs on Functions Flex Consumption**, because the workload is
+bursty, idle most of the time, and its hardest constraint is *bounding* fan-out
+rather than raw throughput:
+
+- `maxConcurrentActivityFunctions` is the only knob that bounds how many pages
+  hit Azure OpenAI at once. That is a Functions host feature, not something you
+  get for free in a container.
+- Scale to zero between batches. Documents arrive in waves; paying for idle
+  compute between them is the main cost risk.
+- Native VNet integration, which plain Consumption (Y1) does not have — and this
+  deployment cannot work without it, since storage is private-endpoint-only.
+- Managed identity for `AzureWebJobsStorage`, which is mandatory when shared keys
+  are disabled.
+- No container image to build, scan or patch for the orchestration tier.
+
+**The model runs on Container Apps**, because YOLO has the opposite profile:
+
+- The image is large (528 MB for PyTorch, 6 GB for the GPU Paddle build) and the
+  model must stay resident in memory across requests. A pool of model instances
+  inside one long-lived process is the whole performance story — measured 104 ms
+  per image at batch 8.
+- GPU is available through workload profiles. Functions has no GPU option.
+- KEDA concurrency scaling can be matched to the in-process worker pool, so a
+  replica only sheds load once its own pool is genuinely saturated.
+
+Running YOLO *inside* the function would mean shipping a multi-hundred-megabyte
+dependency into every orchestration instance and paying its cold start on every
+scale-out. Running the orchestration *inside* ACA would mean rebuilding Durable's
+concurrency governor by hand.
+
 ## The shape, and why
 
 ```

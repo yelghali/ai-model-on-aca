@@ -470,13 +470,30 @@ def process_page(payload: dict) -> dict:
     out: dict = {"page": page + 1, "status": "ok", "page_blob": page_path,
                  "figures": [], "errors": []}
 
+    def _retry_logger(service: str):
+        """Make retries VISIBLE.
+
+        Without this the policy still works, but silently - there is no way to
+        tell a run that sailed through from one that absorbed twenty 429s, and
+        no way to prove the backoff is doing anything. The prefix is fixed so
+        it can be queried:
+
+            traces | where message startswith "RETRY "
+        """
+        def _log(attempt: int, delay: float, exc: Exception) -> None:
+            logging.warning("RETRY %s attempt=%d delay=%.2fs page=%d cause=%s: %s",
+                            service, attempt, delay, page + 1,
+                            type(exc).__name__, exc)
+        return _log
+
     # ---- text extraction (and, for Document AI, the figures too) -----------
     doc_figures: list = []
     if TEXT_SERVICE == "mistral-docai":
         # ONE call returns markdown AND figure regions, so no separate
         # extraction step and no proximity heuristic.
         try:
-            res = run_with_policy(lambda: docai.analyze_page(png, page), THROTTLE_SENSITIVE)
+            res = run_with_policy(lambda: docai.analyze_page(png, page), THROTTLE_SENSITIVE,
+                                  on_retry=_retry_logger("mistral-document-ai"))
             doc_figures = res.pop("figures", [])
             out["text"] = res
         except PermanentError as exc:
@@ -485,7 +502,8 @@ def process_page(payload: dict) -> dict:
     else:
         try:
             out["text"] = run_with_policy(
-                lambda: content_understanding(png, page), THROTTLE_SENSITIVE)
+                lambda: content_understanding(png, page), THROTTLE_SENSITIVE,
+                on_retry=_retry_logger("content-understanding"))
         except PermanentError as exc:
             out["status"] = "partial"
             out["errors"].append({"service": "content-understanding", "error": str(exc)})
@@ -494,7 +512,8 @@ def process_page(payload: dict) -> dict:
     # A 429 from OpenAI must not re-run the text extraction above.
     try:
         out["openai"] = run_with_policy(
-            lambda: openai_page(png, page), THROTTLE_SENSITIVE)
+            lambda: openai_page(png, page), THROTTLE_SENSITIVE,
+            on_retry=_retry_logger("azure-openai"))
     except PermanentError as exc:
         out["status"] = "partial"
         out["errors"].append({"service": "azure-openai", "error": str(exc)})
@@ -528,7 +547,12 @@ def detect_figures(payload: dict) -> list:
     try:
         # SCALE_SENSITIVE: 503/507 here means ACA is adding a replica. Short,
         # jittered backoff - the capacity arrives in seconds.
-        return run_with_policy(lambda: yolo_batch(loaded), SCALE_SENSITIVE)
+        def _log(attempt: int, delay: float, exc: Exception) -> None:
+            logging.warning("RETRY yolo attempt=%d delay=%.2fs figures=%d cause=%s: %s",
+                            attempt, delay, len(figures), type(exc).__name__, exc)
+
+        return run_with_policy(lambda: yolo_batch(loaded), SCALE_SENSITIVE,
+                               on_retry=_log)
     except PermanentError as exc:
         return [{"page": f["page"], "figure": f["figure"], "count": 0,
                  "detections": [], "error": str(exc)} for f in figures]

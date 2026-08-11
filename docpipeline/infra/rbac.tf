@@ -32,9 +32,15 @@ resource "azurerm_role_assignment" "function_storage" {
 }
 
 /*
-  Let the container app pull its image with its own identity when no
-  user-assigned identity was supplied. Scoped to the registry, not the
-  subscription.
+  Image pull.
+
+  A system-assigned identity CANNOT be used here. It does not exist until the
+  container app is created, but the app cannot be created until something with
+  AcrPull can fetch the image - the first apply fails with
+  "UNAUTHORIZED: authentication required".
+
+  A user-assigned identity breaks the cycle: it is created first, granted
+  AcrPull, and only then referenced by the app's registry block.
 */
 data "azurerm_container_registry" "acr" {
   count               = var.container_registry_identity_id == "" ? 1 : 0
@@ -42,9 +48,35 @@ data "azurerm_container_registry" "acr" {
   resource_group_name = var.acr_resource_group != "" ? var.acr_resource_group : azurerm_resource_group.main.name
 }
 
+resource "azurerm_user_assigned_identity" "acr_pull" {
+  count               = var.container_registry_identity_id == "" ? 1 : 0
+  name                = "id-acrpull-${local.suffix}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  tags                = var.tags
+}
+
 resource "azurerm_role_assignment" "yolo_acr_pull" {
   count                = var.container_registry_identity_id == "" ? 1 : 0
   scope                = data.azurerm_container_registry.acr[0].id
   role_definition_name = "AcrPull"
-  principal_id         = azurerm_container_app.yolo.identity[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.acr_pull[0].principal_id
+}
+
+# Role assignments are eventually consistent. Without this pause the container
+# app is often created before the grant is visible to the pull, which fails in
+# exactly the same way as having no grant at all.
+resource "time_sleep" "acr_rbac_propagation" {
+  count           = var.container_registry_identity_id == "" ? 1 : 0
+  depends_on      = [azurerm_role_assignment.yolo_acr_pull]
+  create_duration = "60s"
+}
+
+locals {
+  # Whichever identity ends up doing the pull.
+  acr_identity_id = (
+    var.container_registry_identity_id != ""
+    ? var.container_registry_identity_id
+    : azurerm_user_assigned_identity.acr_pull[0].id
+  )
 }

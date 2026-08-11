@@ -69,6 +69,19 @@ resource "azurerm_function_app_flex_consumption" "main" {
     "AzureWebJobsStorage__credential"  = "managedidentity"
     "STORAGE_ACCOUNT_NAME"             = azurerm_storage_account.main.name
 
+    # The provider ALWAYS emits a connection-string AzureWebJobsStorage derived
+    # from the storage account. With shared keys disabled there is no key to
+    # put in it, so it is emitted as "...;AccountKey=;..." - a syntactically
+    # valid, functionally dead credential. The host prefers it over the
+    # identity settings above, fails to authenticate, and never starts: every
+    # request returns 503 with no telemetry, because the host is not up to
+    # report anything.
+    #
+    # Overriding both to empty makes the host fall through to the
+    # identity-based settings. Do not remove these two lines.
+    "AzureWebJobsStorage"                  = ""
+    "DEPLOYMENT_STORAGE_CONNECTION_STRING" = ""
+
     "UPLOAD_CONTAINER" = "uploads"
     "WORK_CONTAINER"   = "work"
     "RESULT_CONTAINER" = "results"
@@ -77,8 +90,9 @@ resource "azurerm_function_app_flex_consumption" "main" {
     "YOLO_CHUNK"   = var.yolo_chunk
     "TEXT_SERVICE" = var.text_service
 
-    # Internal ingress: resolvable only from inside the VNet.
-    "YOLO_URL"     = "https://${azurerm_container_app.yolo.ingress[0].fqdn}"
+    # Internal ingress: resolvable only from inside the VNet. http, not https -
+    # see the ingress block in aca.tf for why.
+    "YOLO_URL"     = "http://${azurerm_container_app.yolo.ingress[0].fqdn}"
     "YOLO_TIMEOUT" = "120"
 
     "MISTRAL_API_KEY" = var.mistral_api_key

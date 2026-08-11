@@ -23,6 +23,11 @@ uploads/*.pdf ──▶ blob trigger (deterministic instance id, duplicate-safe)
                     ▼  webhook (NOTIFY_URL) + GET /api/status/{id}
 ```
 
+**Diagrams** (open with [diagrams.net](https://app.diagrams.net)):
+[docs/architecture.drawio](docs/architecture.drawio) — Azure hosting, private
+networking and the notification path back to the uploading app.
+[docs/pipeline.drawio](docs/pipeline.drawio) — the orchestration phases.
+
 ## Why the shape is what it is
 
 **Pages and figures are different units.** A 300-page document may hold 60 diagrams;
@@ -174,6 +179,46 @@ cd infra
 Copy-Item terraform.tfvars.example terraform.tfvars   # then edit
 terraform init ; terraform apply
 ```
+
+## Measured on Azure (2026-08-11)
+
+Deployed for real: Flex Consumption (FC1) + private storage + private YOLO on
+Container Apps. Driven by [scripts/azure_e2e.py](scripts/azure_e2e.py), 4
+concurrent uploaders, one PDF each.
+
+| | warm YOLO | YOLO cold (0 replicas) |
+|---|---:|---:|
+| batches Completed | 4 / 4 | 4 / 4 |
+| documents | 4 | 4 |
+| pages | 53 | 53 |
+| figures | 65 | 65 |
+| partial documents | 2 | 2 |
+| elapsed | 19.9 s | 39.2 s |
+| throughput | 2.66 pages/s | 1.35 pages/s |
+
+Pages and figures match the local baseline **exactly** (attention 15p/6f,
+bert 16p/39f, resnet 12p/7f, yolo 10p/13f), so page splitting and figure
+extraction behave identically in Azure.
+
+Retries actually fired — 33 of them in the cold run, all absorbed:
+
+| service | ThrottledError (429) | TransientError | max attempt |
+|---|---:|---:|---:|
+| content-understanding | 17 | 3 | 2 |
+| azure-openai | 7 | 6 | 2 |
+| yolo | 0 | 0 | — |
+
+Two honest notes on that table:
+
+- **YOLO needed no retries even from zero replicas.** ACA's ingress held the
+  connection while a replica started rather than returning 503, so the
+  `SCALE_SENSITIVE` path was never exercised in this run. It is not yet proven
+  under real scale-out pressure — a 4-document test does not push ACA hard
+  enough to shed load.
+- **The 2 partial documents are correct behaviour, not failures.** They come
+  from the injected 1% permanent-400 rate: a permanent error is deliberately
+  *not* retried, the page records the error, and the document is marked
+  `partial` instead of failing the batch.
 
 ## Output
 

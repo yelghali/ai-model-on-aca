@@ -72,6 +72,18 @@ resource "azurerm_subnet" "aca" {
   resource_group_name  = azurerm_resource_group.main.name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = ["10.20.4.0/23"] # /23 minimum for Container Apps
+
+  # A workload-profiles environment requires the same delegation the Flex
+  # subnet uses. Consumption-only environments do not, which is why this is
+  # easy to miss: it fails at create time with
+  # ManagedEnvironmentSubnetDelegationError, not at plan time.
+  delegation {
+    name = "aca"
+    service_delegation {
+      name    = "Microsoft.App/environments"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+    }
+  }
 }
 
 # --- private DNS: blob, queue, table ----------------------------------------

@@ -26,9 +26,13 @@ resource "azurerm_log_analytics_workspace" "main" {
 }
 
 resource "azurerm_container_app_environment" "main" {
-  name                       = local.aca_env_name
-  resource_group_name        = azurerm_resource_group.main.name
-  location                   = azurerm_resource_group.main.location
+  name                = local.aca_env_name
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+
+  # azurerm 5.x requires logs_destination to be stated before it will accept a
+  # workspace id; omitting it is an error, not a default.
+  logs_destination           = "log-analytics"
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 
   infrastructure_subnet_id       = azurerm_subnet.aca.id
@@ -65,6 +69,17 @@ resource "azurerm_private_dns_a_record" "aca" {
   records             = [azurerm_container_app_environment.main.static_ip_address]
 }
 
+# An INTERNAL environment publishes apps at <app>.internal.<env-domain>, and a
+# DNS wildcard matches exactly ONE label - so "*" above does NOT cover
+# "yolo-api.internal.<env-domain>". Without this second record every call from
+# the function fails to resolve.
+resource "azurerm_private_dns_a_record" "aca_internal" {
+  name                = "*.internal"
+  private_dns_zone_id = azurerm_private_dns_zone.aca.id
+  ttl                 = 300
+  records             = [azurerm_container_app_environment.main.static_ip_address]
+}
+
 resource "azurerm_container_app" "yolo" {
   name                         = "yolo-api"
   resource_group_name          = azurerm_resource_group.main.name
@@ -74,15 +89,16 @@ resource "azurerm_container_app" "yolo" {
   tags                         = var.tags
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [local.acr_identity_id]
   }
 
-  dynamic "registry" {
-    for_each = var.container_registry_identity_id == "" ? [] : [1]
-    content {
-      server   = var.container_registry_server
-      identity = var.container_registry_identity_id
-    }
+  # Always present: without a registry block ACA attempts an ANONYMOUS pull and
+  # fails with "UNAUTHORIZED: authentication required", which reads like a
+  # credential problem rather than a missing configuration block.
+  registry {
+    server   = var.container_registry_server
+    identity = local.acr_identity_id
   }
 
   template {
@@ -135,9 +151,24 @@ resource "azurerm_container_app" "yolo" {
     target_port      = 8000
     transport        = "auto"
 
+    # The internal ingress does not complete a TLS handshake on the default
+    # domain - callers get SSLEOFError("EOF occurred in violation of protocol").
+    # Serving port 80 directly (instead of redirecting to 443) makes the hop
+    # work.
+    #
+    # TRADE-OFF, stated plainly: this one hop is unencrypted. It is acceptable
+    # here only because it never leaves the VNet - the app has
+    # external_enabled = false, so it has no internet-facing listener, and the
+    # only caller is the VNet-integrated function. Put a custom domain and
+    # certificate on the environment if the hop must be encrypted.
+    allow_insecure_connections = true
+
     traffic_weight {
       percentage      = 100
       latest_revision = true
     }
   }
+
+  # The grant must be visible before the platform attempts the pull.
+  depends_on = [time_sleep.acr_rbac_propagation]
 }

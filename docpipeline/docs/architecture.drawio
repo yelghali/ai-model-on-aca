@@ -1,0 +1,236 @@
+<mxfile host="app.diagrams.net" agent="docpipeline" version="24.0.0">
+  <diagram id="docpipeline-arch" name="Architecture">
+    <mxGraphModel dx="1600" dy="1100" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1180" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Document pipeline — Durable Functions (Flex Consumption) + private YOLO on Container Apps" style="text;html=1;fontSize=20;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1200" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Storage has NO public network access and NO shared keys (tenant policy). Everything authenticates with managed identity." style="text;html=1;fontSize=13;fontColor=#666666;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="50" width="1200" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- ================= CLIENT ZONE ================= -->
+        <mxCell id="zclient" value="Customer side (public internet)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#999999;dashed=1;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="300" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="capp" value="Customer application&#10;(uploads several documents)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="65" y="145" width="250" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cui" value="Browser — demo UI&#10;GET /api/ui" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="65" y="230" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="chook" value="Webhook receiver&#10;verifies X-Signature-256&#10;(HMAC-SHA256 of the body)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="65" y="320" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="cnote" value="The browser never receives a storage&#10;credential. No SAS, no account key —&#10;there is no network path to blob at all." style="text;html=1;fontSize=11;fontColor=#666666;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="65" y="410" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ================= FUNCTION APP ================= -->
+        <mxCell id="zfunc" value="Azure Functions — Flex Consumption (FC1), public HTTPS ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF9E6;strokeColor=#D6B656;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="400" y="100" width="470" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="fupload" value="POST /api/upload&#10;validates %PDF- magic + size cap&#10;writes blob with managed identity" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="140" width="215" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="fstatus" value="GET /api/ui&#10;GET /api/status/{id}&#10;GET /api/batch/{id}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="645" y="140" width="205" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="fbatch" value="batch_orchestrator — fan-out one sub-orchestration per file" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="228" width="430" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="fdoc" value="document_orchestrator — split pages, fan-out, chunk figures, merge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="274" width="430" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="fact" value="Activities&#10;prepare_document  •  process_page  •  detect_figures  •  merge_results  •  notify" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="320" width="430" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="fnote" value="host.json bounds concurrency PER INSTANCE:&#10;maxConcurrentActivityFunctions = 8.&#10;40 instances x 8 = 320 concurrent model calls —&#10;size this against the OpenAI quota, not YOLO." style="text;html=1;fontSize=11;fontColor=#996600;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="420" y="390" width="440" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="fmi" value="System-assigned managed identity" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="420" y="465" width="430" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ================= STORAGE ================= -->
+        <mxCell id="zstor" value="Storage account — publicNetworkAccess Disabled, allowSharedKeyAccess false" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EAF2FB;strokeColor=#6C8EBF;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="930" y="100" width="420" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="sblob" value="Blob containers&#10;uploads  •  work  •  results  •  deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="955" y="145" width="370" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="sdur" value="Durable Functions backend&#10;control + work-item QUEUES&#10;instance + history TABLES&#10;lease BLOBS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="955" y="215" width="370" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="snote" value="Durable uses ALL THREE data planes.&#10;Granting only Blob Data Contributor gives you&#10;a host that starts, answers HTTP, and then&#10;never schedules a single orchestration.&#10;&#10;RBAC on the function identity:&#10;• Storage Blob Data Contributor&#10;• Storage Queue Data Contributor&#10;• Storage Table Data Contributor" style="text;html=1;fontSize=11;fontColor=#31527A;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="955" y="315" width="380" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ================= VNET ================= -->
+        <mxCell id="zvnet" value="VNet  vnet-docpipe  10.20.0.0/16" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F0F7F0;strokeColor=#82B366;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="400" y="560" width="950" height="420" as="geometry" />
+        </mxCell>
+
+        <mxCell id="snfunc" value="snet-func  10.20.1.0/24&#10;delegated Microsoft.App/environments" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B5B5B5;dashed=1;verticalAlign=top;fontSize=11;align=left;spacingLeft=8;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="420" y="605" width="230" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="fvnet" value="Function outbound&#10;VNet integration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="440" y="655" width="190" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="snpe" value="snet-pe  10.20.2.0/24&#10;private endpoint network policies disabled" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B5B5B5;dashed=1;verticalAlign=top;fontSize=11;align=left;spacingLeft=8;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="680" y="605" width="270" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="peblob" value="Private endpoint — blob" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="655" width="230" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="pequeue" value="Private endpoint — queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="700" width="230" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="petable" value="Private endpoint — table" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="745" width="230" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="pedns" value="+ 3 private DNS zones, linked to the VNet" style="text;html=1;fontSize=10;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="700" y="790" width="240" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="snaca" value="snet-aca  10.20.4.0/23   (/23 is the ACA minimum)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B5B5B5;dashed=1;verticalAlign=top;fontSize=11;align=left;spacingLeft=8;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="980" y="605" width="345" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="acaenv" value="Container Apps environment&#10;internal_load_balancer_enabled = true" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="650" width="305" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="yolo" value="YOLO API  (ingress external_enabled = false)&#10;POST /predict — batch of figures&#10;model pool in-process, KEDA scales 0..10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="712" width="305" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="acadns" value="Private DNS zone for the env default domain&#10;+ wildcard A record -&gt; internal LB IP.&#10;Without it the function resolves the ingress&#10;name on public DNS and every call fails." style="text;html=1;fontSize=10;fontColor=#4C7A34;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="783" width="320" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vnote" value="Nothing in this VNet is reachable from the internet. The only public surface is the function's HTTPS ingress." style="text;html=1;fontSize=11;fontColor=#4C7A34;align=left;" vertex="1" parent="1">
+          <mxGeometry x="420" y="900" width="900" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ================= RETRY / RELIABILITY ================= -->
+        <mxCell id="zretry" value="Retry policy — why the pipeline survives 429s and YOLO scale-out" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FDECEC;strokeColor=#B85450;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="330" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="rclass" value="classify_status()&#10;429 → ThrottledError (honour Retry-After)&#10;408 / 502 / 503 / 504 / 507 → Transient&#10;other 4xx → Permanent, NOT retried&#10;other 5xx → Transient" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B85450;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="600" width="290" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="rpol" value="THROTTLE_SENSITIVE  (OpenAI / Doc AI)&#10;6 attempts, base 1.0s, cap 60s&#10;&#10;SCALE_SENSITIVE  (YOLO on ACA)&#10;6 attempts, base 0.25s, cap 8s&#10;&#10;Full jitter: uniform(0, ceiling) — so retries&#10;from many instances do not re-synchronise." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B85450;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="702" width="290" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="rdur" value="Durable adds an OUTER retry on top&#10;(3 attempts, 2s) — so a whole activity can&#10;be replayed if the worker itself dies.&#10;&#10;A page that fails permanently marks the&#10;document 'partial'. It does not fail the&#10;batch." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B85450;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="844" width="290" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ================= NOTIFICATION CALLOUT ================= -->
+        <mxCell id="znotify" value="Notification back to the uploading app" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F3EAF7;strokeColor=#9673A6;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="100" width="270" height="880" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="1.  Caller owns the identifier&#10;&#10;The uploader may pass its own&#10;correlation id in blob metadata.&#10;Otherwise the id is derived:&#10;sha256(blob_name + size).&#10;&#10;Same file uploaded twice = same&#10;orchestration id = ONE run.&#10;Duplicate uploads are free." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="140" width="230" height="185" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="2.  Pull — while it runs&#10;&#10;set_custom_status publishes&#10;progress DURING the run, so the&#10;UI shows 'page 143 of 300'&#10;rather than just Running.&#10;&#10;GET /api/status/{id}&#10;GET /api/batch/{id}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="340" width="230" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="3.  Push — when it finishes&#10;&#10;The notify activity POSTs&#10;{ event: 'batch.completed', ... }&#10;to NOTIFY_URL.&#10;&#10;Body is serialised ONCE with&#10;sorted keys, then signed:&#10;X-Signature-256 = sha256 HMAC&#10;X-Delivery-Timestamp&#10;&#10;Signing the exact bytes that are&#10;sent is the point — re-serialising&#10;would invalidate the signature." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="520" width="230" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="4.  The delivery must RAISE&#10;&#10;notify re-raises on transport&#10;errors and 5xx so Durable's&#10;retry actually fires&#10;(5 attempts, 5s).&#10;&#10;An earlier version caught&#10;everything and returned a dict —&#10;which silently disabled its own&#10;retry policy." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="785" width="230" height="180" as="geometry" />
+        </mxCell>
+
+        <!-- ================= EDGES ================= -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#333333;endArrow=block;" edge="1" parent="1" source="capp" target="fupload">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1l" value="1  POST multipart PDF" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e1">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#666666;dashed=1;endArrow=block;" edge="1" parent="1" source="cui" target="fstatus">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2l" value="2  poll status" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e2">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#6C8EBF;endArrow=block;" edge="1" parent="1" source="fupload" target="sblob">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3l" value="3  write blob (managed identity, via private endpoint)" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e3">
+          <mxGeometry x="-0.2" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;endArrow=block;" edge="1" parent="1" source="fupload" target="fbatch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4l" value="4  start orchestration" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e4">
+          <mxGeometry x="-0.2" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D6B656;endArrow=block;" edge="1" parent="1" source="fbatch" target="fdoc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5l" value="5  fan out per file" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e5">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D6B656;endArrow=block;" edge="1" parent="1" source="fdoc" target="fact">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6l" value="6  fan out per page" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e6">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#6C8EBF;endArrow=block;startArrow=block;" edge="1" parent="1" source="fmi" target="sdur">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7l" value="Durable state:&#10;queues + tables + blobs" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e7">
+          <mxGeometry x="0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;endArrow=block;" edge="1" parent="1" source="fact" target="fvnet">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#6C8EBF;endArrow=block;" edge="1" parent="1" source="fvnet" target="peblob">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9l" value="7  read pages / write results" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e9">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#82B366;endArrow=block;" edge="1" parent="1" source="fvnet" target="yolo">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="535" y="860" />
+              <mxPoint x="1152" y="860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10l" value="8  detect_figures — POST /predict, 8 figures per call (private, VNet only)" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e10">
+          <mxGeometry x="-0.05" relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#9673A6;endArrow=block;" edge="1" parent="1" source="fact" target="chook">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="380" y="348" />
+              <mxPoint x="380" y="355" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11l" value="9  signed callback" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e11">
+          <mxGeometry x="-0.1" relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

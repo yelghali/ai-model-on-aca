@@ -1,0 +1,24 @@
+target   https://func-docpipe-v524ruos.azurewebsites.net
+users    4 x 1 file(s)
+
+  user 3: uploaded 1 file(s) in 6669 ms -> batch e2e-3-1786458995
+  user 1: uploaded 1 file(s) in 7040 ms -> batch e2e-1-1786458995
+  user 0: uploaded 1 file(s) in 7169 ms -> batch e2e-0-1786458995
+  user 2: uploaded 1 file(s) in 7453 ms -> batch e2e-2-1786458995
+
+waiting for orchestrations...
+  e2e-3-1786458995: Completed
+  e2e-1-1786458995: Completed
+  e2e-0-1786458995: Completed
+  e2e-2-1786458995: Completed
+
+==============================================================
+elapsed                39.2 s
+documents                 4
+pages                    53
+figures                  65
+partial documents         2
+throughput             1.35 pages/s
+==============================================================
+
+OK - every batch Completed, page and figure counts match the local baseline.
