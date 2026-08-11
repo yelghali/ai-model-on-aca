@@ -65,9 +65,22 @@ resource "azurerm_function_app_flex_consumption" "main" {
 
   app_settings = {
     # Identity-based host storage. NOT a connection string - shared keys are off.
+    #
+    # This exact pair is what works. Two variants were tried and both broke it:
+    #
+    #   __blobServiceUri/__queueServiceUri/__tableServiceUri instead of
+    #   __accountName - accepted by the host, but see the note in the README
+    #   about the blob trigger; it does not buy anything here.
+    #
+    #   __serviceUri - DO NOT ADD. A single generic URI cannot serve blob,
+    #   queue and table at once, so Durable loses its queues and the host stops
+    #   starting entirely: the site returns 503 "Site Unavailable" while ARM
+    #   still reports state=Running, availabilityState=Normal.
     "AzureWebJobsStorage__accountName" = azurerm_storage_account.main.name
     "AzureWebJobsStorage__credential"  = "managedidentity"
-    "STORAGE_ACCOUNT_NAME"             = azurerm_storage_account.main.name
+
+    # The application code reads this directly (shared/storage.py).
+    "STORAGE_ACCOUNT_NAME" = azurerm_storage_account.main.name
 
     # The provider ALWAYS emits a connection-string AzureWebJobsStorage derived
     # from the storage account. With shared keys disabled there is no key to

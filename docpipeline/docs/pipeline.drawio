@@ -50,7 +50,7 @@
           <mxGeometry x="40" y="250" width="1020" height="820" as="geometry" />
         </mxCell>
 
-        <mxCell id="trigger" value="Blob trigger  /  POST /api/start&#10;&#10;instance id = correlationid (caller-owned)&#10;fallback = sha256(path+size)&#10;→ duplicate trigger is a no-op"
+        <mxCell id="trigger" value="POST /api/upload  /  POST /api/start&#10;&#10;instance id = correlationid (caller-owned)&#10;fallback = sha256(path+size)&#10;→ duplicate submission is a no-op"
                 style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;"
                 vertex="1" parent="lane-orch">
           <mxGeometry x="60" y="45" width="300" height="90" as="geometry" />

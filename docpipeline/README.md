@@ -1,10 +1,10 @@
 # Document pipeline — Durable Functions fan-out / fan-in
 
-Blob upload → per-page AI extraction → batched YOLO on figures → one JSON per file,
+Upload → per-page AI extraction → batched YOLO on figures → one JSON per file,
 with status polling and a completion webhook.
 
 ```
-uploads/*.pdf ──▶ blob trigger (deterministic instance id, duplicate-safe)
+POST /api/upload  (writes the blob AND starts the run, returns ids)
                     │
                     ▼   one orchestration PER FILE
         ┌───────────────────────────────────────────────┐
@@ -22,6 +22,14 @@ uploads/*.pdf ──▶ blob trigger (deterministic instance id, duplicate-safe)
                     │
                     ▼  webhook (NOTIFY_URL) + GET /api/status/{id}
 ```
+
+**There is no blob trigger, on purpose.** Storage has public network access and
+shared keys disabled, so nothing outside the VNet can write to `uploads/` — not
+even with a SAS, because there is no key to sign one with. The only writer is
+`/api/upload`, which starts the orchestration itself. A blob trigger would be a
+slower second path to start work that already started, racing it on the same
+instance id. It also does not work on Flex Consumption without Event Grid; see
+[Known limitations](#known-limitations).
 
 **Diagrams** (open with [diagrams.net](https://app.diagrams.net)):
 [docs/architecture.drawio](docs/architecture.drawio) — Azure hosting, private
@@ -108,8 +116,9 @@ Other guarantees:
   at the orchestration level either. The document completes as `partial`.
 - **Blob references only** in orchestration history — never image bytes. Durable
   serialises and replays every activity input/output.
-- **Deterministic instance IDs** (`sha256(blob path + size)`) so a duplicate blob trigger
-  is a no-op instead of processing and billing the document twice.
+- **Deterministic instance IDs** — the caller's `correlationId`, else
+  `sha256(blob path + size)` — so a retried or duplicated submission is a no-op
+  instead of processing and billing the document twice.
 - **Separate activities** for Content Understanding and OpenAI: a 429 from one must not
   re-run the other.
 
@@ -149,8 +158,9 @@ func start
 
 | Endpoint | Purpose |
 |---|---|
-| drop a PDF in `uploads/` | starts a run automatically |
-| `POST /api/start` `{"files":["a.pdf"]}` | start a batch, returns ids |
+| `GET /api/ui` | the demo page |
+| `POST /api/upload` (multipart `file`) | upload PDFs **and** start the run |
+| `POST /api/start` `{"files":["a.pdf"]}` | start a batch for files already in the container |
 | `GET /api/status/{instanceId}` | progress for one file |
 | `GET /api/batch/{batchId}` | progress for a whole upload set |
 | `GET /api/status/by-file/{name}` | resolve a run from the file name |
@@ -186,19 +196,20 @@ Deployed for real: Flex Consumption (FC1) + private storage + private YOLO on
 Container Apps. Driven by [scripts/azure_e2e.py](scripts/azure_e2e.py), 4
 concurrent uploaders, one PDF each.
 
-| | warm YOLO | YOLO cold (0 replicas) |
-|---|---:|---:|
-| batches Completed | 4 / 4 | 4 / 4 |
-| documents | 4 | 4 |
-| pages | 53 | 53 |
-| figures | 65 | 65 |
-| partial documents | 2 | 2 |
-| elapsed | 19.9 s | 39.2 s |
-| throughput | 2.66 pages/s | 1.35 pages/s |
+| | warm YOLO | YOLO cold (0 replicas) | re-verified, cold |
+|---|---:|---:|---:|
+| batches Completed | 4 / 4 | 4 / 4 | 4 / 4 |
+| documents | 4 | 4 | 4 |
+| pages | 53 | 53 | 53 |
+| figures | 65 | 65 | 65 |
+| partial documents | 2 | 2 | 2 |
+| elapsed | 19.9 s | 39.2 s | 29.5 s |
+| throughput | 2.66 pages/s | 1.35 pages/s | 1.79 pages/s |
 
-Pages and figures match the local baseline **exactly** (attention 15p/6f,
-bert 16p/39f, resnet 12p/7f, yolo 10p/13f), so page splitting and figure
-extraction behave identically in Azure.
+Three separate runs, hours apart, with a redeploy in between. Pages and figures
+match the local baseline **exactly** every time (attention 15p/6f, bert 16p/39f,
+resnet 12p/7f, yolo 10p/13f), so page splitting and figure extraction behave
+identically in Azure.
 
 Retries actually fired — 33 of them in the cold run, all absorbed:
 
@@ -259,3 +270,22 @@ and the failure is recorded per page and per service.
 - **Per-page APIs dominate the cost.** A 300-page document is ~600 text/vision calls
   against a throttled service versus ~8 batched YOLO calls. Size
   `maxConcurrentActivityFunctions` against the OpenAI quota, not against YOLO.
+- **No blob trigger on Flex Consumption.** The classic polling trigger is
+  unsupported — the host logs *"The Flex Consumption SKU only supports EventGrid
+  as the source for BlobTrigger functions"* once and disables the function.
+  Every other function keeps working, so the app looks perfectly healthy while
+  that entry point is dead. Wiring the Event Grid path (system topic +
+  subscription → `/runtime/webhooks/blobs`) reached a passing validation
+  handshake, but real `BlobCreated` deliveries still returned 500 — 5 events
+  matched the filter, 19 delivery attempts, 0 successes. **I did not get it
+  working.** It was removed rather than left half-wired, which costs nothing
+  here because `/api/upload` is the only possible writer anyway.
+- **`AzureWebJobsStorage__serviceUri` breaks the host.** Do not add it while
+  chasing the above. A single generic URI cannot serve blob, queue and table, so
+  Durable loses its queues and the site returns 503 *"Site Unavailable"* — while
+  ARM still reports `state=Running`, `availabilityState=Normal`. Use
+  `__accountName` + `__credential`.
+- **The internal hop to YOLO is HTTP, not HTTPS.** ACA's internal ingress does
+  not complete a TLS handshake on the default domain (`SSLEOFError`). Acceptable
+  only because the hop never leaves the VNet; put a custom domain and
+  certificate on the environment if it must be encrypted.

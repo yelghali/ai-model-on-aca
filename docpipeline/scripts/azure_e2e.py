@@ -61,19 +61,38 @@ def upload(base: str, paths: list[pathlib.Path], tag: str) -> dict:
 
 
 def poll(base: str, batch_id: str, timeout_s: int) -> dict:
-    """Poll until the batch leaves Running. Returns the final status payload."""
+    """Poll until the batch leaves Running. Returns the final status payload.
+
+    Tolerates transient 5xx. The status API runs on the same Flex instances as
+    the pipeline, so while the app is scaling out under the very load this test
+    creates, a poll can get 502/503. Treating that as a test failure would
+    report a broken pipeline when the orchestration is in fact progressing
+    normally - which is exactly what happened before this loop retried.
+    """
     deadline = time.time() + timeout_s
     last = None
+    transient = 0
     while time.time() < deadline:
-        r = requests.get(f"{base}/api/batch/{batch_id}", timeout=60)
-        if r.status_code == 404:
-            # The orchestration may not be visible for a moment after start.
-            time.sleep(2)
+        try:
+            r = requests.get(f"{base}/api/batch/{batch_id}", timeout=60)
+        except requests.RequestException:
+            transient += 1
+            time.sleep(5)
             continue
+
+        if r.status_code == 404 or r.status_code >= 500:
+            # 404: the orchestration is not visible for a moment after start.
+            # 5xx: the host is scaling. Neither is a verdict.
+            transient += r.status_code >= 500
+            time.sleep(3)
+            continue
+
         r.raise_for_status()
         last = r.json()
         state = last.get("runtimeStatus")
         if state in ("Completed", "Failed", "Terminated"):
+            if transient:
+                print(f"    ({batch_id}: rode out {transient} transient 5xx)")
             return last
         time.sleep(3)
     raise TimeoutError(f"batch {batch_id} still {last and last.get('runtimeStatus')} "

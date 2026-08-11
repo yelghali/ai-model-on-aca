@@ -101,34 +101,31 @@ NOTIFY_RETRY = df.RetryOptions(first_retry_interval_in_milliseconds=5000, max_nu
 
 
 # ---------------------------------------------------------------- triggers ---
-@app.blob_trigger(arg_name="blob", path="uploads/{name}", connection="AzureWebJobsStorage")
-@app.durable_client_input(client_name="client")
-async def on_upload(blob: func.InputStream, client):
-    """Start one orchestration per uploaded file.
-
-    The id comes from the blob's `correlationid` metadata when the app supplied
-    one, otherwise from a hash of path+size. Either way the SAME upload always
-    maps to the SAME instance, so a duplicate trigger (blob triggers can fire
-    more than once) is a no-op instead of processing - and billing - the
-    document twice.
-    """
-    name = blob.name.split("/", 1)[-1]
-    metadata = dict(getattr(blob, "metadata", None) or {})
-    instance_id = _instance_id_for(blob.name, blob.length or 0, metadata)
-
-    existing = await client.get_status(instance_id)
-    if existing and existing.runtime_status and existing.runtime_status.name in (
-        "Running", "Pending", "Completed"
-    ):
-        logging.info("duplicate trigger for %s -> %s already %s",
-                     name, instance_id, existing.runtime_status.name)
-        return
-
-    await client.start_new("document_orchestrator", instance_id, {
-        "file": name, "run_id": instance_id,
-        "batch_id": metadata.get("batchid") or metadata.get("batchId"),
-    })
-    logging.info("started %s for %s", instance_id, name)
+# There is deliberately NO blob trigger here.
+#
+# Two reasons, in order of importance:
+#
+# 1. It is redundant by construction. Storage has publicNetworkAccess disabled
+#    and shared keys disabled, so nothing outside the VNet can put a blob in
+#    uploads/ - not even with a SAS, because there is no key to sign one with.
+#    The ONLY writer is POST /api/upload below, and it already starts the
+#    orchestration synchronously and returns the ids. A blob trigger would be a
+#    slower second path to start work that has already started, racing the
+#    first on the same deterministic instance id.
+#
+# 2. It does not work on Flex Consumption without Event Grid. The polling
+#    listener is unsupported ("The Flex Consumption SKU only supports EventGrid
+#    as the source for BlobTrigger functions") and the function is silently
+#    disabled - every other function keeps working, so the app looks healthy
+#    while that entry point is dead. Wiring the Event Grid path (system topic +
+#    subscription -> /runtime/webhooks/blobs) got as far as a passing
+#    validation handshake, but real BlobCreated deliveries still returned 500.
+#    That attempt is recorded in git history rather than left half-finished.
+#
+# If uploads ever need to arrive by some other route (AzCopy, Data Factory, a
+# partner writing straight to the container), reinstate it via Event Grid AND
+# give the function app a path to receive the events - do not expect the
+# classic trigger to work.
 
 
 @app.route(route="upload", methods=["POST"])
