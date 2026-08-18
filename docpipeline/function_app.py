@@ -51,7 +51,22 @@ from shared.http_policy import (
 from shared.pdfsplit import extract_figures, page_count, render_page
 from shared.simulators import content_understanding, openai_page, yolo_batch
 
-app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+FUNCTION_ROLE = os.getenv("FUNCTION_ROLE", "all").lower()
+DURABLE_TASK_HUB = os.getenv("DURABLE_TASK_HUB", "docpipeline")
+DURABLE_CLIENT_CONNECTION = os.getenv(
+    "DURABLE_CLIENT_CONNECTION", "AzureWebJobsStorage"
+)
+
+if FUNCTION_ROLE not in {"all", "api", "worker"}:
+    raise ValueError("FUNCTION_ROLE must be one of: all, api, worker")
+
+app = (
+    df.DFApp()
+    if FUNCTION_ROLE == "worker"
+    else df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+)
+api_blueprint = df.Blueprint()
+worker_blueprint = df.Blueprint()
 
 # Figures per YOLO call. 8 matches the measured sweet spot (ms/image is flat from
 # 1..8) and keeps a call around a second - far below the ACA 240 s request limit.
@@ -128,8 +143,12 @@ NOTIFY_RETRY = df.RetryOptions(first_retry_interval_in_milliseconds=5000, max_nu
 # classic trigger to work.
 
 
-@app.route(route="upload", methods=["POST"])
-@app.durable_client_input(client_name="client")
+@api_blueprint.route(route="upload", methods=["POST"])
+@api_blueprint.durable_client_input(
+    client_name="client",
+    task_hub=DURABLE_TASK_HUB,
+    connection_name=DURABLE_CLIENT_CONNECTION,
+)
 async def http_upload(req: func.HttpRequest, client) -> func.HttpResponse:
     """Public upload gateway: multipart PDFs in, orchestrations started.
 
@@ -185,7 +204,7 @@ async def http_upload(req: func.HttpRequest, client) -> func.HttpResponse:
     })
 
 
-@app.route(route="ui", methods=["GET"])
+@api_blueprint.route(route="ui", methods=["GET"])
 def http_ui(req: func.HttpRequest) -> func.HttpResponse:
     """Serve the demo page. Static file, no templating, no secrets."""
     path = os.path.join(os.path.dirname(__file__), "ui", "index.html")
@@ -201,8 +220,12 @@ def _json(payload: dict, status: int = 200) -> func.HttpResponse:
                              status_code=status, mimetype="application/json")
 
 
-@app.route(route="start", methods=["POST"])
-@app.durable_client_input(client_name="client")
+@api_blueprint.route(route="start", methods=["POST"])
+@api_blueprint.durable_client_input(
+    client_name="client",
+    task_hub=DURABLE_TASK_HUB,
+    connection_name=DURABLE_CLIENT_CONNECTION,
+)
 async def http_start(req: func.HttpRequest, client) -> func.HttpResponse:
     """Start a BATCH the app already uploaded.
 
@@ -249,15 +272,23 @@ async def http_start(req: func.HttpRequest, client) -> func.HttpResponse:
     }, indent=2), mimetype="application/json")
 
 
-@app.route(route="status/{instance_id}", methods=["GET"])
-@app.durable_client_input(client_name="client")
+@api_blueprint.route(route="status/{instance_id}", methods=["GET"])
+@api_blueprint.durable_client_input(
+    client_name="client",
+    task_hub=DURABLE_TASK_HUB,
+    connection_name=DURABLE_CLIENT_CONNECTION,
+)
 async def http_status(req: func.HttpRequest, client) -> func.HttpResponse:
     """Progress for one run. Safe to poll while the workflow is still running."""
     return await _status_response(client, req.route_params.get("instance_id"))
 
 
-@app.route(route="status/by-file/{name}", methods=["GET"])
-@app.durable_client_input(client_name="client")
+@api_blueprint.route(route="status/by-file/{name}", methods=["GET"])
+@api_blueprint.durable_client_input(
+    client_name="client",
+    task_hub=DURABLE_TASK_HUB,
+    connection_name=DURABLE_CLIENT_CONNECTION,
+)
 async def http_status_by_file(req: func.HttpRequest, client) -> func.HttpResponse:
     """Escape hatch: resolve a run from the FILE NAME.
 
@@ -274,8 +305,12 @@ async def http_status_by_file(req: func.HttpRequest, client) -> func.HttpRespons
     return await _status_response(client, instance_id)
 
 
-@app.route(route="batch/{batch_id}", methods=["GET"])
-@app.durable_client_input(client_name="client")
+@api_blueprint.route(route="batch/{batch_id}", methods=["GET"])
+@api_blueprint.durable_client_input(
+    client_name="client",
+    task_hub=DURABLE_TASK_HUB,
+    connection_name=DURABLE_CLIENT_CONNECTION,
+)
 async def http_batch_status(req: func.HttpRequest, client) -> func.HttpResponse:
     """Progress for a whole upload set: per-file status plus an aggregate."""
     return await _status_response(client, req.route_params.get("batch_id"))
@@ -299,7 +334,7 @@ async def _status_response(client, instance_id: str) -> func.HttpResponse:
 
 
 # ----------------------------------------------------------- orchestrators ---
-@app.orchestration_trigger(context_name="context")
+@worker_blueprint.orchestration_trigger(context_name="context")
 def batch_orchestrator(context: df.DurableOrchestrationContext):
     """Fan out over FILES, then send ONE callback for the whole set.
 
@@ -344,7 +379,7 @@ def batch_orchestrator(context: df.DurableOrchestrationContext):
 
 
 # ----------------------------------------------------------- orchestrator ---
-@app.orchestration_trigger(context_name="context")
+@worker_blueprint.orchestration_trigger(context_name="context")
 def document_orchestrator(context: df.DurableOrchestrationContext):
     args = context.get_input()
     file_name, run_id = args["file"], args["run_id"]
@@ -439,14 +474,14 @@ def document_orchestrator(context: df.DurableOrchestrationContext):
 
 
 # -------------------------------------------------------------- activities ---
-@app.activity_trigger(input_name="payload")
+@worker_blueprint.activity_trigger(input_name="payload")
 def prepare_document(payload: dict) -> dict:
     storage.ensure_containers()
     pdf = storage.read_blob(storage.UPLOAD_CONTAINER, payload["file"])
     return {"file": payload["file"], "pages": page_count(pdf)}
 
 
-@app.activity_trigger(input_name="payload")
+@worker_blueprint.activity_trigger(input_name="payload")
 def process_page(payload: dict) -> dict:
     """One page: render, Content Understanding, OpenAI, extract figures.
 
@@ -532,7 +567,7 @@ def process_page(payload: dict) -> dict:
     return out
 
 
-@app.activity_trigger(input_name="payload")
+@worker_blueprint.activity_trigger(input_name="payload")
 def detect_figures(payload: dict) -> list:
     """YOLO on a BATCH of figures. Fetches bytes from blob by reference."""
     figures = payload["figures"]
@@ -555,7 +590,7 @@ def detect_figures(payload: dict) -> list:
                  "detections": [], "error": str(exc)} for f in figures]
 
 
-@app.activity_trigger(input_name="payload")
+@worker_blueprint.activity_trigger(input_name="payload")
 def merge_results(payload: dict) -> dict:
     """Fan-in: ONE json per file, one entry per page."""
     file_name, run_id = payload["file"], payload["run_id"]
@@ -589,14 +624,18 @@ def merge_results(payload: dict) -> dict:
             **({"errors": p["errors"]} if p.get("errors") else {}),
         })
 
+    figure_errors = sum(
+        1 for page in pages_out for figure in page["figures"] if figure.get("error")
+    )
     doc = {
         "file": file_name,
         "run_id": run_id,
         "batch_id": payload.get("batch_id"),
         "pages": len(pages_out),
         "figures": sum(len(p["figures"]) for p in pages_out),
-        "status": "ok" if failed == 0 else "partial",
+        "status": "ok" if failed == 0 and figure_errors == 0 else "partial",
         "pages_with_errors": failed,
+        "figure_errors": figure_errors,
         "results": pages_out,
     }
 
@@ -608,11 +647,11 @@ def merge_results(payload: dict) -> dict:
     # to Storage and a 300-page result set with text would hit the size limits.
     return {"file": file_name, "run_id": run_id, "status": doc["status"],
             "pages": doc["pages"], "figures": doc["figures"],
-            "pages_with_errors": failed,
+            "pages_with_errors": failed, "figure_errors": figure_errors,
             "result_blob": f"{storage.RESULT_CONTAINER}/{out_path}"}
 
 
-@app.activity_trigger(input_name="payload")
+@worker_blueprint.activity_trigger(input_name="payload")
 def notify(payload: dict) -> dict:
     """Deliver the completion callback.
 
@@ -627,3 +666,9 @@ def notify(payload: dict) -> dict:
     except PermanentError as exc:
         logging.error("notify rejected permanently: %s", exc)
         return {"notified": False, "permanent": True, "error": str(exc)}
+
+
+if FUNCTION_ROLE in {"all", "api"}:
+    app.register_functions(api_blueprint)
+if FUNCTION_ROLE in {"all", "worker"}:
+    app.register_functions(worker_blueprint)

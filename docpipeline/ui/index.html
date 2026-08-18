@@ -91,7 +91,7 @@ async function upload(fileList, batchId) {
   const fd = new FormData();
   for (const f of fileList) fd.append("file", f, f.name);
   if (batchId) fd.append("batchId", batchId);
-  const r = await fetch("api/upload", { method: "POST", body: fd });
+  const r = await fetch("./upload", { method: "POST", body: fd });
   if (!r.ok) throw new Error("upload failed: " + r.status + " " + await r.text());
   return r.json();
 }
@@ -111,7 +111,7 @@ async function poll() {
   for (const [id, st] of tracked) {
     if (st.status === "Completed" || st.status === "Failed") continue;
     try {
-      const r = await fetch("api/status/" + id);
+      const r = await fetch("./status/" + id);
       if (!r.ok) continue;
       const s = await r.json();
       st.status = s.runtimeStatus || st.status;

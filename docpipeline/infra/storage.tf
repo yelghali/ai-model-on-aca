@@ -34,7 +34,43 @@ resource "azurerm_storage_account" "main" {
     bypass         = ["AzureServices"]
   }
 
+  # Defender for Storage injects a scanner private-link exception. It is
+  # service-managed and must not be removed by an unrelated infrastructure run.
+  lifecycle {
+    ignore_changes = [network_rules[0].private_link_access]
+  }
+
   tags = var.tags
+}
+
+# Host/deployment storage for the public API app. Keeping this separate from
+# the worker task hub prevents API host traffic from competing with Durable
+# queue, table, and history operations.
+resource "azurerm_storage_account" "api" {
+  name                = local.api_storage_name
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  account_kind             = "StorageV2"
+  min_tls_version          = "TLS1_2"
+
+  https_traffic_only_enabled      = true
+  public_network_access_enabled   = false
+  shared_access_key_enabled       = false
+  allow_nested_items_to_be_public = false
+
+  network_rules {
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
+  }
+
+  lifecycle {
+    ignore_changes = [network_rules[0].private_link_access]
+  }
+
+  tags = merge(var.tags, { tier = "api" })
 }
 
 /*
@@ -59,4 +95,12 @@ resource "azurerm_storage_container" "main" {
   container_access_type = "private"
 
   depends_on = [azurerm_private_endpoint.storage]
+}
+
+resource "azurerm_storage_container" "api_deploy" {
+  name                  = "deploy"
+  storage_account_id    = azurerm_storage_account.api.id
+  container_access_type = "private"
+
+  depends_on = [azurerm_private_endpoint.api_storage]
 }

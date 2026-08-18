@@ -4,6 +4,10 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+    "FUNCTION_ROLE": "all",
+    "DURABLE_TASK_HUB": "docpipeline",
+    "WorkerStorage": "UseDevelopmentStorage=true",
+    "DURABLE_CLIENT_CONNECTION": "WorkerStorage",
 
     "UPLOAD_CONTAINER": "uploads",
     "WORK_CONTAINER": "work",

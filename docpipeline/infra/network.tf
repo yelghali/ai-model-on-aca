@@ -28,9 +28,11 @@ resource "random_string" "suffix" {
 locals {
   suffix = random_string.suffix.result
   # Storage account names: 3-24 chars, lowercase alphanumeric only.
-  storage_name  = substr("st${var.name_prefix}${local.suffix}", 0, 24)
-  function_name = "func-${var.name_prefix}-${local.suffix}"
-  aca_env_name  = "cae-${var.name_prefix}-${local.suffix}"
+  storage_name         = substr("st${var.name_prefix}${local.suffix}", 0, 24)
+  api_storage_name     = substr("st${var.name_prefix}api${local.suffix}", 0, 24)
+  api_function_name    = "func-${var.name_prefix}-${local.suffix}"
+  worker_function_name = "func-${var.name_prefix}-worker-${local.suffix}"
+  aca_env_name         = "cae-${var.name_prefix}-${local.suffix}"
 }
 
 resource "azurerm_virtual_network" "main" {
@@ -42,10 +44,11 @@ resource "azurerm_virtual_network" "main" {
 }
 
 resource "azurerm_subnet" "func" {
-  name                 = "snet-func"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = ["10.20.1.0/24"]
+  name                            = "snet-func"
+  resource_group_name             = azurerm_resource_group.main.name
+  virtual_network_name            = azurerm_virtual_network.main.name
+  address_prefixes                = ["10.20.1.0/24"]
+  default_outbound_access_enabled = false
 
   # Flex Consumption VNet integration requires this exact delegation.
   delegation {
@@ -58,20 +61,22 @@ resource "azurerm_subnet" "func" {
 }
 
 resource "azurerm_subnet" "pe" {
-  name                 = "snet-pe"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = ["10.20.2.0/24"]
+  name                            = "snet-pe"
+  resource_group_name             = azurerm_resource_group.main.name
+  virtual_network_name            = azurerm_virtual_network.main.name
+  address_prefixes                = ["10.20.2.0/24"]
+  default_outbound_access_enabled = false
 
   # Private endpoint NICs cannot live in a subnet that enforces network policies.
   private_endpoint_network_policies = "Disabled"
 }
 
 resource "azurerm_subnet" "aca" {
-  name                 = "snet-aca"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = ["10.20.4.0/23"] # /23 minimum for Container Apps
+  name                            = "snet-aca"
+  resource_group_name             = azurerm_resource_group.main.name
+  virtual_network_name            = azurerm_virtual_network.main.name
+  address_prefixes                = ["10.20.4.0/23"] # /23 minimum for Container Apps
+  default_outbound_access_enabled = false
 
   # A workload-profiles environment requires the same delegation the Flex
   # subnet uses. Consumption-only environments do not, which is why this is
@@ -122,6 +127,29 @@ resource "azurerm_private_endpoint" "storage" {
   private_service_connection {
     name                           = "psc-${each.key}"
     private_connection_resource_id = azurerm_storage_account.main.id
+    subresource_names              = [each.key]
+    is_manual_connection           = false
+  }
+
+  private_dns_zone_group {
+    name                 = "default"
+    private_dns_zone_ids = [azurerm_private_dns_zone.storage[each.key].id]
+  }
+}
+
+# The API Function App has its own host/deployment storage. It still reaches the
+# worker storage account above as a Durable client and to write uploaded PDFs.
+resource "azurerm_private_endpoint" "api_storage" {
+  for_each            = toset(local.storage_services)
+  name                = "pe-${local.api_storage_name}-${each.key}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  subnet_id           = azurerm_subnet.pe.id
+  tags                = var.tags
+
+  private_service_connection {
+    name                           = "psc-api-${each.key}"
+    private_connection_resource_id = azurerm_storage_account.api.id
     subresource_names              = [each.key]
     is_manual_connection           = false
   }

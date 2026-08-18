@@ -69,17 +69,6 @@ resource "azurerm_private_dns_a_record" "aca" {
   records             = [azurerm_container_app_environment.main.static_ip_address]
 }
 
-# An INTERNAL environment publishes apps at <app>.internal.<env-domain>, and a
-# DNS wildcard matches exactly ONE label - so "*" above does NOT cover
-# "yolo-api.internal.<env-domain>". Without this second record every call from
-# the function fails to resolve.
-resource "azurerm_private_dns_a_record" "aca_internal" {
-  name                = "*.internal"
-  private_dns_zone_id = azurerm_private_dns_zone.aca.id
-  ttl                 = 300
-  records             = [azurerm_container_app_environment.main.static_ip_address]
-}
-
 resource "azurerm_container_app" "yolo" {
   name                         = "yolo-api"
   resource_group_name          = azurerm_resource_group.main.name
@@ -147,7 +136,11 @@ resource "azurerm_container_app" "yolo" {
   }
 
   ingress {
-    external_enabled = false # private: VNet only
+    # "External" is relative to the ACA environment. This must be true for a
+    # caller in another VNet subnet (the Function App) to enter through the
+    # environment load balancer. The environment itself has an INTERNAL load
+    # balancer, so this remains private and has no internet-facing endpoint.
+    external_enabled = true
     target_port      = 8000
     transport        = "auto"
 
@@ -158,9 +151,9 @@ resource "azurerm_container_app" "yolo" {
     #
     # TRADE-OFF, stated plainly: this one hop is unencrypted. It is acceptable
     # here only because it never leaves the VNet - the app has
-    # external_enabled = false, so it has no internet-facing listener, and the
-    # only caller is the VNet-integrated function. Put a custom domain and
-    # certificate on the environment if the hop must be encrypted.
+    # external ingress inside an internal-only ACA environment, so it has no
+    # internet-facing listener. Put a custom domain and certificate on the
+    # environment if the hop must be encrypted.
     allow_insecure_connections = true
 
     traffic_weight {

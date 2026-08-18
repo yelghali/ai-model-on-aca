@@ -29,15 +29,21 @@
           <mxGeometry x="65" y="410" width="260" height="60" as="geometry" />
         </mxCell>
 
-        <!-- ================= FUNCTION APP ================= -->
-        <mxCell id="zfunc" value="Azure Functions — Flex Consumption (FC1), public HTTPS ingress" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF9E6;strokeColor=#D6B656;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+        <!-- ================= FUNCTION APPS ================= -->
+        <mxCell id="zfunc" value="Azure Functions — separate API + Durable worker Flex apps (one FC1 plan each)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF9E6;strokeColor=#D6B656;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
           <mxGeometry x="400" y="100" width="470" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="fapilabel" value="API Function App — FUNCTION_ROLE=api — public HTTPS, HTTP-scaled" style="text;html=1;fontSize=10;fontStyle=1;fontColor=#996600;align=left;" vertex="1" parent="1">
+          <mxGeometry x="420" y="120" width="430" height="18" as="geometry" />
         </mxCell>
         <mxCell id="fupload" value="POST /api/upload&#10;validates %PDF- magic + size cap&#10;writes blob with managed identity" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="420" y="140" width="215" height="70" as="geometry" />
         </mxCell>
         <mxCell id="fstatus" value="GET /api/ui&#10;GET /api/status/{id}&#10;GET /api/batch/{id}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="645" y="140" width="205" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="fworkerlabel" value="Durable Worker Function App — FUNCTION_ROLE=worker — 1 always-ready + task-hub scale-out" style="text;html=1;fontSize=10;fontStyle=1;fontColor=#996600;align=left;" vertex="1" parent="1">
+          <mxGeometry x="420" y="210" width="430" height="18" as="geometry" />
         </mxCell>
         <mxCell id="fbatch" value="batch_orchestrator — fan-out one sub-orchestration per file" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="420" y="228" width="430" height="38" as="geometry" />
@@ -51,21 +57,21 @@
         <mxCell id="fnote" value="host.json bounds concurrency PER INSTANCE:&#10;maxConcurrentActivityFunctions = 8.&#10;40 instances x 8 = 320 concurrent model calls —&#10;size this against the OpenAI quota, not YOLO." style="text;html=1;fontSize=11;fontColor=#996600;align=left;verticalAlign=top;" vertex="1" parent="1">
           <mxGeometry x="420" y="390" width="440" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="fmi" value="System-assigned managed identity" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="fmi" value="Separate identities • host storage • Application Insights • scale ceilings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="420" y="465" width="430" height="30" as="geometry" />
         </mxCell>
 
         <!-- ================= STORAGE ================= -->
-        <mxCell id="zstor" value="Storage account — publicNetworkAccess Disabled, allowSharedKeyAccess false" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EAF2FB;strokeColor=#6C8EBF;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+        <mxCell id="zstor" value="Private storage — worker/data account + separate API host-storage account" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EAF2FB;strokeColor=#6C8EBF;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
           <mxGeometry x="930" y="100" width="420" height="420" as="geometry" />
         </mxCell>
-        <mxCell id="sblob" value="Blob containers&#10;uploads  •  work  •  results  •  deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="sblob" value="Worker/data blobs&#10;uploads  •  work  •  results  •  worker deploy&#10;API account: host state + API deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="955" y="145" width="370" height="55" as="geometry" />
         </mxCell>
-        <mxCell id="sdur" value="Durable Functions backend&#10;control + work-item QUEUES&#10;instance + history TABLES&#10;lease BLOBS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="sdur" value="Worker-owned Durable task hub: docpipeline&#10;control + work-item QUEUES&#10;instance + history TABLES&#10;lease BLOBS&#10;API connects as client via WorkerStorage" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="955" y="215" width="370" height="85" as="geometry" />
         </mxCell>
-        <mxCell id="snote" value="Durable uses ALL THREE data planes.&#10;Granting only Blob Data Contributor gives you&#10;a host that starts, answers HTTP, and then&#10;never schedules a single orchestration.&#10;&#10;RBAC on the function identity:&#10;• Storage Blob Data Contributor&#10;• Storage Queue Data Contributor&#10;• Storage Table Data Contributor" style="text;html=1;fontSize=11;fontColor=#31527A;align=left;verticalAlign=top;" vertex="1" parent="1">
+        <mxCell id="snote" value="Durable uses ALL THREE data planes.&#10;The API identity can upload and start/query.&#10;Only the worker identity indexes orchestrator&#10;and activity triggers and consumes messages.&#10;&#10;Both use managed-identity RBAC:&#10;• Storage Blob Data Contributor&#10;• Storage Queue Data Contributor&#10;• Storage Table Data Contributor" style="text;html=1;fontSize=11;fontColor=#31527A;align=left;verticalAlign=top;" vertex="1" parent="1">
           <mxGeometry x="955" y="315" width="380" height="160" as="geometry" />
         </mxCell>
 
@@ -77,7 +83,7 @@
         <mxCell id="snfunc" value="snet-func  10.20.1.0/24&#10;delegated Microsoft.App/environments" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B5B5B5;dashed=1;verticalAlign=top;fontSize=11;align=left;spacingLeft=8;spacingTop=4;" vertex="1" parent="1">
           <mxGeometry x="420" y="605" width="230" height="120" as="geometry" />
         </mxCell>
-        <mxCell id="fvnet" value="Function outbound&#10;VNet integration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="fvnet" value="API + worker outbound&#10;VNet integration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="440" y="655" width="190" height="50" as="geometry" />
         </mxCell>
 
@@ -103,14 +109,14 @@
         <mxCell id="acaenv" value="Container Apps environment&#10;internal_load_balancer_enabled = true" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1000" y="650" width="305" height="50" as="geometry" />
         </mxCell>
-        <mxCell id="yolo" value="YOLO API  (ingress external_enabled = false)&#10;POST /predict — batch of figures&#10;model pool in-process, KEDA scales 0..10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="yolo" value="YOLO API  (app ingress external_enabled = true)&#10;Environment load balancer remains internal/VNet-private&#10;POST /predict — batch of figures&#10;2 model workers, HTTP target 2, scales 0..10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1000" y="712" width="305" height="65" as="geometry" />
         </mxCell>
         <mxCell id="acadns" value="Private DNS zone for the env default domain&#10;+ wildcard A record -&gt; internal LB IP.&#10;Without it the function resolves the ingress&#10;name on public DNS and every call fails." style="text;html=1;fontSize=10;fontColor=#4C7A34;align=left;verticalAlign=top;" vertex="1" parent="1">
           <mxGeometry x="1000" y="783" width="320" height="55" as="geometry" />
         </mxCell>
 
-        <mxCell id="vnote" value="Nothing in this VNet is reachable from the internet. The only public surface is the function's HTTPS ingress." style="text;html=1;fontSize=11;fontColor=#4C7A34;align=left;" vertex="1" parent="1">
+        <mxCell id="vnote" value="Storage and ACA are not internet-facing. The only public application surface is the API Function App's HTTPS ingress." style="text;html=1;fontSize=11;fontColor=#4C7A34;align=left;" vertex="1" parent="1">
           <mxGeometry x="420" y="900" width="900" height="20" as="geometry" />
         </mxCell>
 
@@ -170,7 +176,7 @@
         <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;endArrow=block;" edge="1" parent="1" source="fupload" target="fbatch">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e4l" value="4  start orchestration" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e4">
+        <mxCell id="e4l" value="4  Durable client → WorkerStorage / docpipeline" style="edgeLabel;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;" vertex="1" connectable="0" parent="e4">
           <mxGeometry x="-0.2" relative="1" as="geometry" />
         </mxCell>
 

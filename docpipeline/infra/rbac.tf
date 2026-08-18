@@ -15,7 +15,8 @@
 */
 
 locals {
-  function_principal_id = azurerm_function_app_flex_consumption.main.identity[0].principal_id
+  api_function_principal_id    = azurerm_function_app_flex_consumption.api.identity[0].principal_id
+  worker_function_principal_id = azurerm_function_app_flex_consumption.worker.identity[0].principal_id
 
   storage_data_roles = [
     "Storage Blob Data Contributor",
@@ -24,11 +25,34 @@ locals {
   ]
 }
 
-resource "azurerm_role_assignment" "function_storage" {
+moved {
+  from = azurerm_role_assignment.function_storage
+  to   = azurerm_role_assignment.api_pipeline_storage
+}
+
+# Existing grants move with the existing app identity. The API needs all three
+# planes to enqueue/read Durable state and Blob Contributor to upload PDFs.
+resource "azurerm_role_assignment" "api_pipeline_storage" {
   for_each             = toset(local.storage_data_roles)
   scope                = azurerm_storage_account.main.id
   role_definition_name = each.key
-  principal_id         = local.function_principal_id
+  principal_id         = local.api_function_principal_id
+}
+
+resource "azurerm_role_assignment" "api_host_storage" {
+  for_each             = toset(local.storage_data_roles)
+  scope                = azurerm_storage_account.api.id
+  role_definition_name = each.key
+  principal_id         = local.api_function_principal_id
+}
+
+# Only this identity indexes orchestrator/activity triggers and consumes task
+# hub messages. Never grant another worker app ownership of the same hub.
+resource "azurerm_role_assignment" "worker_storage" {
+  for_each             = toset(local.storage_data_roles)
+  scope                = azurerm_storage_account.main.id
+  role_definition_name = each.key
+  principal_id         = local.worker_function_principal_id
 }
 
 /*

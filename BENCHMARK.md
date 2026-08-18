@@ -380,12 +380,13 @@ accuracy**:
   The token alphabet excludes visually ambiguous glyphs (`0/O`, `1/I`, `5/S`, `8/B`),
   because an earlier run reported 21/24 "wrong" that turned out to be the OCR reading
   `0` as `O` — each result *had* matched its own image.
-- **YOLO** — the largest returned box must be centred where *that* image's ellipse was
+- **Both YOLO runtimes** — the largest returned box must be centred where *that* image's ellipse was
   drawn. If the model detects nothing at all the page counts as `no_detection`, never as
   contamination. Over 5,371 images `no_detection` was **0**.
 
-**0 wrong pages** across all three deployments, including 1,047 concurrent YOLO batches at
-peak 6 replicas. The per-request model pool holds under sustained multi-hour concurrency.
+**0 wrong pages** across all four deployments and 21,895 processed images. The PyTorch
+per-request model pool and the shared, thread-safe ONNX session both held under sustained
+multi-hour concurrency.
 
 ---
 

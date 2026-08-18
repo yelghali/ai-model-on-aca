@@ -25,6 +25,13 @@ yolo_chunk   = "8"                     # figures per YOLO call
 function_max_instances      = 40
 function_instance_memory_mb = 2048
 
+# Public API scales independently from Durable processing.
+api_function_max_instances      = 20
+api_function_instance_memory_mb = 2048
+
+# The worker app owns this hub; the API app targets it as a client only.
+durable_task_hub_name = "docpipeline"
+
 # --- optional ---------------------------------------------------------------
 # notify_url    = "https://your-app.example.com/hooks/docpipeline"
 # notify_secret = "..."   # enables HMAC-SHA256 signing of callbacks

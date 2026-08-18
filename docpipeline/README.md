@@ -7,18 +7,19 @@ with status polling and a completion webhook.
 POST /api/upload  (writes the blob AND starts the run, returns ids)
                     │
                     ▼   one orchestration PER FILE
-        ┌───────────────────────────────────────────────┐
-        │ PHASE 1 — fan out per PAGE                    │
-        │   Content Understanding  (1 call / page)      │
-        │   Azure OpenAI           (1 call / page)      │
-        │   extract figures        (raster + vector)    │
-        ├───────────────────────────────────────────────┤
-        │ collect figures across ALL pages → chunk by 8 │
-        ├───────────────────────────────────────────────┤
-        │ PHASE 2 — fan out per CHUNK → YOLO (batched)  │
-        ├───────────────────────────────────────────────┤
-        │ PHASE 3 — merge → results/<file>.json         │
-        └───────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────┐
+        │ PHASE 1 — fan out per PAGE                       │
+        │   text + figure regions:                         │
+        │     default: CU + PyMuPDF                        │
+        │     optional: Mistral Document AI (one call)     │
+        │   Azure OpenAI              (1 call / page)      │
+        ├──────────────────────────────────────────────────┤
+        │ collect figures across ALL pages → chunk by 8    │
+        ├──────────────────────────────────────────────────┤
+        │ PHASE 2 — fan out per CHUNK → YOLO (batched)     │
+        ├──────────────────────────────────────────────────┤
+        │ PHASE 3 — merge → results/<file>.json            │
+        └──────────────────────────────────────────────────┘
                     │
                     ▼  webhook (NOTIFY_URL) + GET /api/status/{id}
 ```
@@ -36,7 +37,110 @@ instance id. It also does not work on Flex Consumption without Event Grid; see
 networking and the notification path back to the uploading app.
 [docs/pipeline.drawio](docs/pipeline.drawio) — the orchestration phases.
 
+## Functions shown in the Azure portal
+
+Azure discovers 13 functions from [`function_app.py`](function_app.py), split
+across two Flex Consumption Function Apps by the `FUNCTION_ROLE` setting. The
+public API app indexes six HTTP/client functions. The worker app indexes two
+orchestrators and five activities. `Enabled` means that host loaded the function;
+it does not describe the outcome of an individual document run.
+
+Both apps deploy the same package, but role-gated blueprints keep runtime
+ownership separate:
+
+| Function App role | Indexed functions | Scaling signal |
+|---|---|---|
+| `api` | UI, upload, start, status, batch status | HTTP load |
+| `worker` | orchestrators and activities | Durable task-hub backlog |
+
+The API's Durable client explicitly targets the worker-owned `docpipeline` task
+hub through an identity-based `WorkerStorage` connection. Status does not require
+co-location because orchestration state lives in the task hub. Only the worker
+app consumes that hub; running two different worker apps against one hub can
+compete for messages and leave orchestrations stuck.
+
+The Durable extension itself also uses `WorkerStorage`; do not let it fall back
+to Flex's generated `AzureWebJobsStorage` connection string. Shared keys are
+disabled, and that generated value contains an empty `AccountKey`. The worker
+keeps one `durable` instance always ready, as recommended for Durable Functions
+on Flex, and scales out from task-hub backlog.
+
+**HTTP entry points** are called by the browser or another application:
+
+| Portal name | Route | Responsibility |
+|---|---|---|
+| `http_ui` | `GET /api/ui` | Serves the upload demo page. |
+| `http_upload` | `POST /api/upload` | Accepts PDFs, writes them to the private `uploads` container, and starts a batch. |
+| `http_start` | `POST /api/start` | Starts a batch for files that are already in `uploads`; the browser normally uses `http_upload`. |
+| `http_status` | `GET /api/status/{instanceId}` | Returns Durable runtime state, live phase/progress, and the final result summary for one file. |
+| `http_status_by_file` | `GET /api/status/by-file/{name}` | Resolves an orchestration from an uploaded blob name. |
+| `http_batch_status` | `GET /api/batch/{batchId}` | Returns aggregate status for all files in one upload batch. |
+
+**Orchestrations** coordinate work. Durable Functions persists and replays them,
+so they schedule activities but do not perform network or file I/O themselves:
+
+| Portal name | Responsibility |
+|---|---|
+| `batch_orchestrator` | Parent workflow: starts one document sub-orchestration per file, waits for all files, aggregates their summaries, and sends one batch callback. |
+| `document_orchestrator` | Per-file workflow: count pages, fan out page processing, batch figures for YOLO, merge the result, and publish progress. |
+
+**Activities** perform the actual I/O and computation scheduled by the
+orchestrators:
+
+| Portal name | Responsibility |
+|---|---|
+| `prepare_document` | Reads the uploaded PDF and counts its pages. |
+| `process_page` | Renders one page, extracts text, runs summarisation, extracts figures, and writes page/figure images to `work`. |
+| `detect_figures` | Sends one chunk of figures to the private YOLO Container App and correlates detections by page and figure number. |
+| `merge_results` | Combines page and YOLO outputs and writes one JSON document to `results/<uploaded-file>.json`. |
+| `notify` | Sends the optional signed completion webhook after the workflow finishes. |
+
+The normal call chain crosses the Function App boundary through the task hub:
+
+```text
+API app:    http_ui -> http_upload -> worker task hub
+            http_status / http_batch_status -> worker task hub
+
+Worker app: batch_orchestrator -> document_orchestrator
+                                   -> prepare_document
+                                   -> process_page (one per page)
+                                   -> detect_figures (one per chunk) -> ACA YOLO API
+                                   -> merge_results
+            -> notify
+```
+
+The three status fields answer different questions:
+
+| Field | Example | Meaning |
+|---|---|---|
+| Durable runtime status | `Completed` | The orchestration executed successfully. |
+| Progress phase | `done` | Page processing, figure detection, merge, and result storage all finished. |
+| Document result status | `partial` | The workflow finished, but one or more pages recorded a permanent service error; details are preserved in the result JSON. |
+
+Therefore `Completed` + `done` + `partial` is valid: execution completed, but
+the document result is incomplete. Retryable 429/503 failures do not cause
+`partial` when they recover; permanent 400-class page failures do.
+
 ## Why the shape is what it is
+
+**Durable Functions is the control plane; the YOLO API is the compute plane.**
+The document is already a Durable job. `/predict` does not replace job control;
+it is a short, stateless invocation that keeps the model resident and reusable
+across batches. This is the preferred shape while a batched inference remains
+comfortably below the configured 120-second client timeout and ACA's 240-second
+default ingress limit.
+
+If one inference becomes long or unpredictable, keep the Durable orchestration
+but replace the held HTTP call with external queue-backed work: write input
+references, enqueue an idempotent job, let an ACA worker write the result, then
+resume the orchestration from a completion event or durable polling activity.
+A queue-scaled Container App avoids reloading the model for every message. ACA
+Jobs are better for coarse one-off or scheduled batches, not one Job per small
+figure chunk.
+
+See [the concurrency guide](../docs/CONCURRENCY.md#how-aca-http-scaling-behaves-over-time)
+for the target-2 scale calculation, 15-second metric window, five-minute
+scale-down behavior, request timeouts, and the API-versus-job recommendation.
 
 **Pages and figures are different units.** A 300-page document may hold 60 diagrams;
 some pages have none. Measured on the sample papers:
@@ -179,37 +283,52 @@ With `YOLO_URL` empty, YOLO is simulated and the whole pipeline runs for free.
 ## Deploy it to Azure
 
 [infra/](infra/README.md) has Terraform for the storage account, the Flex
-Consumption function app and a **private** YOLO API on Container Apps. Storage is
-private-endpoint-only with shared keys disabled, so everything authenticates with
-managed identity — the browser talks to `/api/upload`, and the function is the
-only thing with a network path to either blob or the model.
+Consumption API and worker Function Apps, and a **private** YOLO API on Container
+Apps. The two Function Apps have independent FC1 plans, identities, host storage,
+telemetry, and scaling. Storage is private-endpoint-only with shared keys
+disabled, so every storage and task-hub connection uses managed identity.
 
 ```powershell
 cd infra
 Copy-Item terraform.tfvars.example terraform.tfvars   # then edit
 terraform init ; terraform apply
+cd ..
+.\deploy.ps1 -Target both
 ```
+
+For the one-time migration from the former combined Function App, the deployment
+script sends the role-gated package to API first and worker second. Durable work
+can wait safely in storage during that short gap, and the order prevents two
+worker hosts from consuming the same task hub. Later releases can use
+`-Target api` or `-Target worker` independently.
 
 ## Measured on Azure (2026-08-11)
 
 Deployed for real: Flex Consumption (FC1) + private storage + private YOLO on
 Container Apps. Driven by [scripts/azure_e2e.py](scripts/azure_e2e.py), 4
-concurrent uploaders, one PDF each.
+concurrent uploaders, one PDF each. These runs used the default
+`TEXT_SERVICE=content-understanding` path: simulated Content Understanding and
+Azure OpenAI calls, plus PyMuPDF raster/vector figure extraction. They did not
+call live Mistral Document AI.
 
-| | warm YOLO | YOLO cold (0 replicas) | re-verified, cold |
-|---|---:|---:|---:|
-| batches Completed | 4 / 4 | 4 / 4 | 4 / 4 |
-| documents | 4 | 4 | 4 |
-| pages | 53 | 53 | 53 |
-| figures | 65 | 65 | 65 |
-| partial documents | 2 | 2 | 2 |
-| elapsed | 19.9 s | 39.2 s | 29.5 s |
-| throughput | 2.66 pages/s | 1.35 pages/s | 1.79 pages/s |
+| | warm YOLO | YOLO cold (0 replicas) | re-verified, cold | final pre-shutdown |
+|---|---:|---:|---:|---:|
+| batches Completed | 4 / 4 | 4 / 4 | 4 / 4 | 4 / 4 |
+| documents | 4 | 4 | 4 | 4 |
+| pages | 53 | 53 | 53 | 53 |
+| figures | 65 | 65 | 65 | 65 |
+| partial documents | 2 | 2 | 2 | 0 |
+| elapsed | 19.9 s | 39.2 s | 29.5 s | 38.7 s |
+| throughput | 2.66 pages/s | 1.35 pages/s | 1.79 pages/s | 1.37 pages/s |
 
-Three separate runs, hours apart, with a redeploy in between. Pages and figures
+Four separate runs, hours apart, with a redeploy in between. Pages and figures
 match the local baseline **exactly** every time (attention 15p/6f, bert 16p/39f,
 resnet 12p/7f, yolo 10p/13f), so page splitting and figure extraction behave
-identically in Azure.
+identically in Azure. These historical runs did not assert on figure-level YOLO
+errors, so they do **not** prove that ACA inference succeeded.
+
+The former combined Function App was intentionally stopped after this historical
+verification. The separate API and worker apps are live as of 2026-08-18.
 
 Retries actually fired — 33 of them in the cold run, all absorbed:
 
@@ -221,15 +340,34 @@ Retries actually fired — 33 of them in the cold run, all absorbed:
 
 Two honest notes on that table:
 
-- **YOLO needed no retries even from zero replicas.** ACA's ingress held the
-  connection while a replica started rather than returning 503, so the
-  `SCALE_SENSITIVE` path was never exercised in this run. It is not yet proven
-  under real scale-out pressure — a 4-document test does not push ACA hard
-  enough to shed load.
-- **The 2 partial documents are correct behaviour, not failures.** They come
+- **The historical YOLO result was a false positive.** App-level internal
+  ingress accepts traffic only from the same ACA environment. The Function is
+  in another VNet subnet, so ACA returned its branded 404 "Container App -
+  Unavailable" page before `/predict`; the old E2E check validated figure counts
+  but not figure inference errors. The fix uses app-level external ingress on an
+  internal-only ACA environment, which remains VNet-private, and the E2E check
+  now fails on any `figure_errors`.
+- **The 2 partial documents in the first three runs are correct behaviour, not failures.** They come
   from the injected 1% permanent-400 rate: a permanent error is deliberately
   *not* retried, the page records the error, and the document is marked
-  `partial` instead of failing the batch.
+  `partial` instead of failing the batch. The final run had no partial documents.
+
+Re-verified on 2026-08-18 after the ingress and assertion fixes. A warm run
+completed one 15-page document with 6 figure responses from private ACA and
+`figure_errors: 0`. A second run started with revision `yolo-api--0000004` at
+zero replicas and completed with the same counts and zero figure errors in
+89.0 seconds; the revision then reported one replica. YOLOv8n returned zero
+object detections for those academic diagrams, which is valid model output:
+the stock COCO model has no `diagram` class. These runs prove pipeline-to-ACA
+execution and scale-from-zero, not diagram-recognition accuracy.
+
+The API/worker split was applied and verified live on 2026-08-18 while
+preserving `https://func-docpipe-v524ruos.azurewebsites.net`. Azure indexed
+exactly 6 API functions and 7 worker functions. After a focused 15-page run
+completed in 64.6 seconds, the four-user test completed all 4 batches in 43.1
+seconds: 4 documents, 53 pages, 65 figures, zero figure errors, and exact local
+baseline counts. One document was `partial` because the demo intentionally
+injects permanent page errors; no batch failed.
 
 ## Output
 
@@ -285,7 +423,8 @@ and the failure is recorded per page and per service.
   Durable loses its queues and the site returns 503 *"Site Unavailable"* — while
   ARM still reports `state=Running`, `availabilityState=Normal`. Use
   `__accountName` + `__credential`.
-- **The internal hop to YOLO is HTTP, not HTTPS.** ACA's internal ingress does
-  not complete a TLS handshake on the default domain (`SSLEOFError`). Acceptable
-  only because the hop never leaves the VNet; put a custom domain and
-  certificate on the environment if it must be encrypted.
+- **The private hop to YOLO is HTTP, not HTTPS.** ACA's load-balancer ingress in
+  this environment does not complete a TLS handshake on the default domain
+  (`SSLEOFError`). Acceptable only because the ACA environment is internal and
+  the hop never leaves the VNet; put a custom domain and certificate on the
+  environment if it must be encrypted.

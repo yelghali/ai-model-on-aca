@@ -12,6 +12,9 @@
   "extensions": {
     "durableTask": {
       "hubName": "docpipeline",
+      "storageProvider": {
+        "connectionName": "WorkerStorage"
+      },
       "maxConcurrentActivityFunctions": 8,
       "maxConcurrentOrchestratorFunctions": 5
     }

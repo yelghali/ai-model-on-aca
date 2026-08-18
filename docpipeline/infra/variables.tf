@@ -25,7 +25,7 @@ variable "name_prefix" {
 
 variable "function_instance_memory_mb" {
   type        = number
-  description = "Flex Consumption per-instance memory."
+  description = "Durable worker Flex Consumption per-instance memory."
   default     = 2048
 
   validation {
@@ -34,10 +34,27 @@ variable "function_instance_memory_mb" {
   }
 }
 
+variable "api_function_instance_memory_mb" {
+  type        = number
+  description = "Public API Flex Consumption per-instance memory."
+  default     = 2048
+
+  validation {
+    condition     = contains([512, 2048, 4096], var.api_function_instance_memory_mb)
+    error_message = "Flex Consumption supports 512, 2048 or 4096 MB."
+  }
+}
+
+variable "api_function_max_instances" {
+  type        = number
+  description = "Independent Flex scale ceiling for UI, upload, start, and status HTTP functions."
+  default     = 20
+}
+
 variable "function_max_instances" {
   type        = number
   description = <<-EOT
-    Flex Consumption scale ceiling.
+    Durable worker Flex Consumption scale ceiling.
 
     NOTE this multiplies with maxConcurrentActivityFunctions in host.json:
     40 instances x 8 concurrent activities = 320 simultaneous calls into Azure
@@ -45,6 +62,17 @@ variable "function_max_instances" {
     this against the OpenAI quota rather than against YOLO.
   EOT
   default     = 40
+}
+
+variable "durable_task_hub_name" {
+  type        = string
+  description = "Worker-owned Durable task hub targeted by the API app's client binding."
+  default     = "docpipeline"
+
+  validation {
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9]{2,44}$", var.durable_task_hub_name))
+    error_message = "durable_task_hub_name must be 3-45 alphanumeric characters and start with a letter."
+  }
 }
 
 variable "yolo_image" {

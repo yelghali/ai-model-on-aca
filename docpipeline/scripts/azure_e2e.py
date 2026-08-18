@@ -131,6 +131,10 @@ def check_document(doc: dict) -> list[str]:
     if pages and errs > pages:
         problems.append(f"{name}: {errs} pages_with_errors but only {pages} pages")
 
+    figure_errors = doc.get("figure_errors") or 0
+    if figure_errors:
+        problems.append(f"{name}: {figure_errors} figure inference error(s)")
+
     if not doc.get("result_blob"):
         problems.append(f"{name}: no result_blob recorded")
 
@@ -184,6 +188,7 @@ def main() -> int:
     print("\nwaiting for orchestrations...")
     problems: list[str] = []
     totals = {"files": 0, "pages": 0, "figures": 0, "partial": 0,
+              "figure_errors": 0,
               "retries_throttle": 0, "retries_transient": 0, "permanent": 0}
 
     for body in batches:
@@ -207,6 +212,7 @@ def main() -> int:
             totals["files"] += 1
             totals["pages"] += doc.get("pages") or 0
             totals["figures"] += doc.get("figures") or 0
+            totals["figure_errors"] += doc.get("figure_errors") or 0
             if doc.get("status") == "partial":
                 totals["partial"] += 1
             problems += check_document(doc)
@@ -217,6 +223,7 @@ def main() -> int:
     print(f"documents          {totals['files']:8d}")
     print(f"pages              {totals['pages']:8d}")
     print(f"figures            {totals['figures']:8d}")
+    print(f"figure errors      {totals['figure_errors']:8d}")
     print(f"partial documents  {totals['partial']:8d}")
     if totals["pages"]:
         print(f"throughput         {totals['pages'] / elapsed:8.2f} pages/s")

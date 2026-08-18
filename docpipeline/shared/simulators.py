@@ -17,6 +17,7 @@ whole pipeline runs locally for free.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import random
 import time
@@ -112,8 +113,24 @@ def yolo_batch(figures: list[dict]) -> list[dict]:
         # Connection reset mid-scale-out is transient, not a bad request.
         raise TransientError(f"yolo: {type(exc).__name__}") from exc
 
-    err = classify_status(resp.status_code, _retry_after(resp))
+    # ACA can answer the first scale-from-zero request with a branded 404 page
+    # before a replica is ready. This is capacity arriving, not a missing route.
+    aca_cold_start = (
+        resp.status_code == 404
+        and "Azure Container App - Unavailable" in resp.text
+    )
+    err = (
+        TransientError("yolo: ACA unavailable during scale-out (404)")
+        if aca_cold_start
+        else classify_status(resp.status_code, _retry_after(resp))
+    )
     if err:
+        detail = " ".join(resp.text.split())[:300] or "<empty>"
+        logging.warning("YOLO HTTP error status=%d url=%s body=%s",
+                        resp.status_code, resp.url, detail)
+        if isinstance(err, PermanentError):
+            raise PermanentError(
+                f"yolo: {resp.status_code} from {resp.url}; body={detail}")
         raise err
 
     body = resp.json()
