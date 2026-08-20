@@ -65,6 +65,64 @@ POST /api/upload
 The supported ingestion path is `POST /api/upload`; there is intentionally no blob-trigger
 path on Flex Consumption.
 
+### Production concurrency, scaling, and timeouts
+
+**Durable pipeline**
+
+- Treat each AI service as an independent stage; do not combine every AI call in one
+   monolithic page activity.
+- Keep one logical work item per page at each page-scoped stage so retries, progress, and
+   failures remain page-specific.
+- For large documents, release pages in bounded windows or page-range sub-orchestrations
+   instead of scheduling an unbounded fan-out.
+- Store page and image payloads in Blob Storage and pass only references through Durable
+   orchestration history.
+
+Each stage needs its own queue or worker adapter because its capacity can differ from every
+other stage:
+
+| Stage example | Durable work item | Concurrency policy |
+|---|---|---|
+| Page rendering or extraction | One page | Bound by Function CPU and memory |
+| YOLO-style model | One inference request, optionally containing a model-supported batch | Match the replica's measured inference pool |
+| Rate-limited AI API | One page or image | Bound by that API's RPM, TPM, and concurrent-request quota |
+| Single-inference API | One page or image | One consumer; allow scale-out only when the limit is per replica rather than global |
+
+**ACA scaling for a YOLO-style inference API**
+
+- If one replica can execute 10 representative inference requests concurrently, enforce a
+   pool or semaphore of 10 inside the API and set ACA `concurrentRequests = 10`.
+- Treat `concurrentRequests` as a **scale target, not a hard admission limit**. The approximate
+   relationship is `desired replicas = ceil(concurrent HTTP requests / 10)`.
+- ACA counts HTTP requests, not images. A request containing a batch of 10 images still counts
+   as one request, so benchmark and configure scaling with the real request shape.
+- Prefer queue-based scaling for asynchronous inference; use HTTP scaling for short,
+   synchronous calls.
+
+**Services with different limits**
+
+- Durable activity concurrency is per Function host instance, not a global per-service quota.
+- Put independently constrained services behind separate queues and workers or Function Apps.
+- For a service limited to one inference globally, use one consumer and one maximum worker
+   instance, and enforce that limit in the adapter or API itself.
+- For a service limited to one inference per replica, set concurrency to one and allow replicas
+   to scale out.
+
+**Timeouts and retries**
+
+- ACA HTTP ingress has a 240-second request timeout. Keep synchronous inference comfortably
+   below both the client and platform limits.
+- Set a shorter client timeout, retry transient failures with jitter, honor `Retry-After`, and
+   make every operation idempotent.
+- For long or unpredictable inference, submit work asynchronously, return a job ID, and resume
+   the Durable orchestration from a completion event or durable timer instead of holding an HTTP
+   activity open.
+
+Official Microsoft documentation:
+
+- [Set scaling rules in Azure Container Apps](https://learn.microsoft.com/azure/container-apps/scale-app#http)
+- [Ingress in Azure Container Apps: protocol types and request timeout](https://learn.microsoft.com/azure/container-apps/ingress-overview#protocol-types)
+
 ### Which service extracts figures?
 
 The verified Azure runs used the default `TEXT_SERVICE=content-understanding` path: the
